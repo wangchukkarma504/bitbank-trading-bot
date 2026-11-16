@@ -107,12 +107,19 @@ def estimate_crypto_tax_jpy(
     else:
         national_filing_required = net_crypto_profit_jpy > 0
 
+    filing_window = f"Feb 16 – Mar 15, {profile.tax_year + 1}"
     if net_crypto_profit_jpy <= 0:
+        advice = (
+            f"No tax filing needed for {profile.tax_year}: your YTD crypto net profit is "
+            f"¥{net_crypto_profit_jpy:,.0f} (0 or negative), so ¥0 tax is owed and neither 確定申告 "
+            f"nor 住民税申告 is required for crypto."
+        )
         return {
             "estimated_tax_jpy": 0.0,
             "effective_rate_pct": 0.0,
             "national_filing_required": False,
             "resident_tax_note": "No taxable profit recorded.",
+            "filing_advice": advice,
             "threshold_pct": round(threshold_pct, 1),
             "remaining_to_threshold_jpy": round(max(0.0, threshold - net_misc), 2),
         }
@@ -136,9 +143,19 @@ def estimate_crypto_tax_jpy(
         # while 10% local resident tax (住民税) still applies.
         est_tax = resident_tax
         note = "Under ¥200k national threshold (salary worker): National 確定申告 exempt, ~10% 住民税 applies."
+        advice = (
+            f"No national 確定申告 needed for {profile.tax_year}: your company does your job tax (年末調整) and "
+            f"net crypto + side income (¥{net_misc:,.0f}) is ≤ ¥200,000. However, report ~¥{est_tax:,.0f} (10% 住民税) "
+            f"at your city office during {filing_window} unless already filing 確定申告."
+        )
     else:
         est_tax = incremental_national + resident_tax
         note = "Over threshold (or non-salary): Combined National 所得税 + 2.1% surtax + 10% 住民税 estimated."
+        sal_txt = f" on ¥{profile.annual_salary_jpy:,.0f} salary" if profile.annual_salary_jpy > 0 else ""
+        advice = (
+            f"You MUST file 確定申告 for {profile.tax_year} (file between {filing_window}): combined profit "
+            f"(¥{net_misc:,.0f}) exceeds the ¥200,000 limit. Set aside ~¥{est_tax:,.0f} total tax reserve{sal_txt}."
+        )
 
     eff_rate = (est_tax / net_crypto_profit_jpy * 100.0) if net_crypto_profit_jpy > 0 else 0.0
     return {
@@ -146,6 +163,7 @@ def estimate_crypto_tax_jpy(
         "effective_rate_pct": round(eff_rate, 1),
         "national_filing_required": national_filing_required,
         "resident_tax_note": note,
+        "filing_advice": advice,
         "threshold_pct": round(threshold_pct, 1),
         "remaining_to_threshold_jpy": round(max(0.0, threshold - net_misc), 2),
     }

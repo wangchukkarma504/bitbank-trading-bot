@@ -409,14 +409,15 @@ class TestFastAPIServer(unittest.TestCase):
         # Net profit = 170000 - 120 - 100 = 169780 (under 200k by itself)
         self.assertEqual(rep["net_realized_profit_jpy"], 169780.0)
         self.assertFalse(rep["tax_estimate"]["national_filing_required"])
+        self.assertIn("No national 確定申告 needed", rep["tax_estimate"]["filing_advice"])
 
-        # 2) POST /api/tax/profile adding 5M salary + 50k other misc income -> pushes over 200k!
+        # 2) POST /api/tax/profile adding 4M salary + 50k other misc income -> pushes over 200k!
         r_prof = client.post(
             "/api/tax/profile",
             json={
                 "tax_year": 2026,
                 "employment_type": "salary",
-                "annual_salary_jpy": 5000000,
+                "annual_salary_jpy": 4000000,
                 "other_misc_income_jpy": 50000,
                 "taxpayer_name": "Taro Yamada",
                 "tax_office": "Shibuya",
@@ -427,6 +428,7 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertTrue(rep2["tax_estimate"]["national_filing_required"])
         self.assertGreater(rep2["tax_estimate"]["estimated_tax_jpy"], 20000.0)
         self.assertEqual(rep2["tax_estimate"]["remaining_to_threshold_jpy"], 0.0)
+        self.assertIn("MUST file 確定申告", rep2["tax_estimate"]["filing_advice"])
 
         # 3) GET /api/tax/csv returns Excel-ready CSV with Japanese header & summary
         r_csv = client.get("/api/tax/csv?year=2026")

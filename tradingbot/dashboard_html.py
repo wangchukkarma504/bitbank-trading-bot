@@ -167,7 +167,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 9px 6px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 700; font-size: 12px; }
-  .chart-wrap { width: 100%; height: 220px; position: relative; }
+  .chart-wrap { width: 100%; height: 220px; position: relative; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
   svg { width: 100%; height: 100%; display: block; }
   .alert {
     padding: 12px 16px; border-radius: 12px; margin-bottom: 16px; font-size: 13px; font-weight: 600;
@@ -408,13 +408,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="ms-row" style="margin-bottom:16px;">
+    <div class="ms-row" style="margin-bottom:12px;">
       <div class="ms-head">
         <span id="taxThresholdLabel">¥200,000 Salaried National Filing Threshold</span>
         <span id="taxThresholdPct">0%</span>
       </div>
       <div class="bar-bg"><div id="taxThresholdBar" style="height:100%;width:0%;background:linear-gradient(90deg,#16a34a,#22c55e);border-radius:999px;transition:width .35s ease;"></div></div>
     </div>
+
+    <div id="taxVerdictBox" style="padding:11px 14px;border-radius:12px;margin-bottom:14px;font-size:13px;font-weight:700;line-height:1.45;background:rgba(22,163,74,0.1);border:1px solid rgba(22,163,74,0.28);color:#14532d;">Checking filing requirement...</div>
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px;">
       <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.65);border:1px solid rgba(15,23,42,0.08);">
@@ -707,14 +709,18 @@ function renderChart(trades, baseline, openPositions, inTradePnl) {
     return;
   }
 
-  const w = Math.max(260, Math.floor(wrap.clientWidth || 720));
-  const isMobile = w < 640;
-  const h = isMobile ? 190 : 220;
+  const wrapW = Math.max(260, Math.floor(wrap.clientWidth || 720));
+  const isMobile = wrapW < 640;
+  const h = isMobile ? 205 : 225;
   wrap.style.height = h + 'px';
-  const padL = isMobile ? 8 : 14;
-  const padR = isMobile ? 56 : 70;
-  const padTop = 16;
-  const padBot = 24;
+  const padL = 22;
+  const padR = 58;
+  const padTop = 26;
+  const padBot = 30;
+  const pxPerPt = isMobile ? 66 : 76;
+  const w = Math.max(wrapW, padL + Math.max(1, pts.length - 1) * pxPerPt + padR);
+  const wasNearRight = !wrap.dataset.scrolledOnce || (wrap.scrollWidth - wrap.clientWidth - wrap.scrollLeft) < 36;
+  const prevScroll = wrap.scrollLeft;
 
   const vals = pts.map(p => p.pnl);
   let maxV = Math.max(...vals, 100), minV = Math.min(...vals, -100);
@@ -744,34 +750,25 @@ function renderChart(trades, baseline, openPositions, inTradePnl) {
     const gy = y(v);
     const isZero = Math.abs(v) < 1e-6;
     return `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${(w - padR).toFixed(1)}" y2="${gy.toFixed(1)}" stroke="${isZero ? '#64748b' : 'rgba(15,23,42,0.08)'}" stroke-dasharray="${isZero ? '4 4' : '2 3'}" stroke-width="1"/>
-      <text x="${(w - padR + 6).toFixed(1)}" y="${(gy + 3.5).toFixed(1)}" fill="${isZero ? '#334155' : '#64748b'}" font-size="${isMobile ? 9.5 : 10.5}" font-weight="${isZero ? 800 : 600}">${isZero ? '¥0' : fmtShort(v)}</text>`;
+      <text x="${(w - padR + 6).toFixed(1)}" y="${(gy + 3.5).toFixed(1)}" fill="${isZero ? '#334155' : '#64748b'}" font-size="10" font-weight="${isZero ? 800 : 600}">${isZero ? '¥0' : fmtShort(v)}</text>`;
   }).join('');
 
-  // Stride X-axis labels cleanly so they never overlap on mobile
-  const maxXLabels = isMobile ? 5 : 9;
-  const xStep = Math.max(1, Math.ceil((pts.length - 1) / (maxXLabels - 1)));
   const dots = coords.map((p, idx) => {
     const isEnd = idx === coords.length - 1;
     const col = p.isStart ? '#64748b' : (p.isLive ? '#2563eb' : (p.pnl >= 0 ? '#16a34a' : '#dc2626'));
-    const showX = isEnd || idx === 0 || (idx % xStep === 0 && (coords.length - 1 - idx) >= Math.max(1, Math.floor(xStep * 0.6)));
     const anchor = isEnd ? 'end' : (idx === 0 ? 'start' : 'middle');
-    const rDot = p.isStart ? 3 : (isEnd ? 5 : (isMobile ? 3.2 : 4));
-    // Only show inline value pill for final point to eliminate overlapping text
-    let endLabel = '';
-    if (isEnd && !p.isStart) {
-      const sign = p.pnl >= 0 ? '+' : '';
-      const valTxt = `${sign}${fmtJpy(p.pnl)}`;
-      const valY = p.y > padTop + 18 ? p.y - 9 : p.y + 15;
-      endLabel = `<text x="${p.x.toFixed(1)}" y="${valY.toFixed(1)}" text-anchor="end" fill="${col}" font-size="${isMobile ? 10.5 : 11.5}" font-weight="800">${valTxt}</text>`;
-    }
+    const rDot = p.isStart ? 3.5 : (isEnd ? 5.5 : 4.5);
+    const sign = p.pnl >= 0 ? '+' : '';
+    const valTxt = p.isStart ? '¥0' : `${sign}${fmtJpy(p.pnl)}`;
+    const valY = p.pnl >= 0 ? Math.max(15, p.y - 10) : Math.min(h - 24, p.y + 16);
     return `<g>
-      <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${rDot}" fill="${col}" stroke="#fff" stroke-width="1.5"/>
-      ${endLabel}
-      ${showX ? `<text x="${p.x.toFixed(1)}" y="${h - 6}" text-anchor="${anchor}" fill="#475569" font-size="${isMobile ? 9.5 : 10.5}" font-weight="700">${p.shortLbl}</text>` : ''}
+      <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${rDot}" fill="${col}" stroke="#fff" stroke-width="1.6"/>
+      ${p.isStart ? '' : `<text x="${p.x.toFixed(1)}" y="${valY.toFixed(1)}" text-anchor="${anchor}" fill="${col}" font-size="10.5" font-weight="800">${valTxt}</text>`}
+      <text x="${p.x.toFixed(1)}" y="${h - 7}" text-anchor="${anchor}" fill="#475569" font-size="10" font-weight="700">${p.shortLbl}</text>
     </g>`;
   }).join('');
 
-  wrap.innerHTML = `<svg id="tradeSvg" viewBox="0 0 ${w} ${h}" width="100%" height="100%" style="cursor:crosshair;touch-action:pan-y;">
+  wrap.innerHTML = `<svg id="tradeSvg" viewBox="0 0 ${w} ${h}" style="width:${w}px;min-width:${w}px;height:${h}px;display:block;cursor:crosshair;touch-action:pan-x pan-y;">
     <defs>
       <linearGradient id="tradeGrad" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.18"/>
@@ -784,6 +781,13 @@ function renderChart(trades, baseline, openPositions, inTradePnl) {
     <line id="tradeCrossV" x1="0" y1="${padTop}" x2="0" y2="${(h - padBot).toFixed(1)}" stroke="rgba(15,23,42,0.3)" stroke-width="1" stroke-dasharray="3 3" style="display:none;"/>
     ${dots}
   </svg>`;
+
+  if (wasNearRight) {
+    wrap.scrollLeft = w;
+    wrap.dataset.scrolledOnce = '1';
+  } else {
+    wrap.scrollLeft = prevScroll;
+  }
 
   const svg = document.getElementById('tradeSvg');
   const crossV = document.getElementById('tradeCrossV');
@@ -1433,6 +1437,23 @@ function renderTaxReport(rep) {
   }
 
   const net = Number(rep.net_realized_profit_jpy || 0);
+  const verdictEl = document.getElementById('taxVerdictBox');
+  if (verdictEl) {
+    verdictEl.textContent = est.filing_advice || est.resident_tax_note || '';
+    if (req) {
+      verdictEl.style.background = 'rgba(239,68,68,0.12)';
+      verdictEl.style.borderColor = 'rgba(220,38,38,0.35)';
+      verdictEl.style.color = '#991b1b';
+    } else if (net > 0) {
+      verdictEl.style.background = 'rgba(245,158,11,0.12)';
+      verdictEl.style.borderColor = 'rgba(217,119,6,0.35)';
+      verdictEl.style.color = '#92400e';
+    } else {
+      verdictEl.style.background = 'rgba(22,163,74,0.1)';
+      verdictEl.style.borderColor = 'rgba(22,163,74,0.28)';
+      verdictEl.style.color = '#14532d';
+    }
+  }
   const netEl = document.getElementById('taxNetVal');
   if (netEl) {
     netEl.textContent = (net >= 0 ? '+' : '') + fmtJpy(net);
