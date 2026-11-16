@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import threading
@@ -561,11 +562,21 @@ class BotController:
                         last_px = 0.0
                     if free_amt * last_px >= 500.0:
                         cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair) or PairConfig(pair=pair, price_digits=3, amount_digits=4)
-                        amt_str = f"{free_amt:.{cfg.amount_digits}f}"
-                        res = client.order(pair, side="sell", amount=amt_str, type_="market")
-                        closed.append({"pair": pair, "side": "spot", "amount": amt_str, "order_id": res.get("order_id")})
+                        scale = 10 ** cfg.amount_digits
+                        floored_amt = math.floor(free_amt * scale) / scale
+                        if floored_amt > 0:
+                            amt_str = f"{floored_amt:.{cfg.amount_digits}f}"
+                            res = client.order(pair, side="sell", amount=amt_str, type_="market")
+                            closed.append({"pair": pair, "side": "spot", "amount": amt_str, "order_id": res.get("order_id")})
             except Exception as e:
                 errors.append(f"Spot close error: {e}")
+
+            for pair in SUPPORTED_PAIRS:
+                mgr = self.orchestrator.risk_manager.get_sync_manager(pair, client)
+                mgr.current_stop_id = None
+                mgr.current_stop_level = None
+                mgr.current_stop_qty = None
+                self.orchestrator.position_reviewer.spot_entry_prices.pop(pair, None)
 
         report = {
             "status": "EMERGENCY_STOPPED",
@@ -634,16 +645,25 @@ class BotController:
                             free_amt = float(a.get("free_amount", 0.0))
                             if free_amt > 0.0001:
                                 cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair) or PairConfig(pair=pair, price_digits=3, amount_digits=4)
-                                amt_str = f"{free_amt:.{cfg.amount_digits}f}"
-                                res = client.order(pair, side="sell", amount=amt_str, type_="market")
-                                closed.append({
-                                    "pair": pair,
-                                    "side": "spot",
-                                    "amount": amt_str,
-                                    "order_id": res.get("order_id"),
-                                })
+                                scale = 10 ** cfg.amount_digits
+                                floored_amt = math.floor(free_amt * scale) / scale
+                                if floored_amt > 0:
+                                    amt_str = f"{floored_amt:.{cfg.amount_digits}f}"
+                                    res = client.order(pair, side="sell", amount=amt_str, type_="market")
+                                    closed.append({
+                                        "pair": pair,
+                                        "side": "spot",
+                                        "amount": amt_str,
+                                        "order_id": res.get("order_id"),
+                                    })
                 except Exception as e:
                     errors.append(f"Spot close error on {pair}: {e}")
+
+            mgr = self.orchestrator.risk_manager.get_sync_manager(pair, client)
+            mgr.current_stop_id = None
+            mgr.current_stop_level = None
+            mgr.current_stop_qty = None
+            self.orchestrator.position_reviewer.spot_entry_prices.pop(pair, None)
 
         logger.warning(f"MANUAL CLOSE EXECUTED on {pair} ({position_side}): closed={closed}, cancelled={cancelled}, errors={errors}")
         return {

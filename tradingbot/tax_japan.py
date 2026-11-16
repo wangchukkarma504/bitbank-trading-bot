@@ -182,7 +182,7 @@ def fetch_year_trades_bitbank(client: Any, tax_year: int) -> Tuple[List[Dict[str
     cursor_end = end_ms
     err_msg: Optional[str] = None
 
-    for _ in range(10):  # up to 10,000 fills/year cleanly
+    for _ in range(30):  # up to 30,000 fills/year cleanly
         try:
             res = client._get(
                 "/user/spot/trade_history",
@@ -207,7 +207,7 @@ def fetch_year_trades_bitbank(client: Any, tax_year: int) -> Tuple[List[Dict[str
                 added += 1
         if len(batch) < 1000 or added == 0 or min_ts <= start_ms:
             break
-        cursor_end = min_ts - 1
+        cursor_end = min_ts
 
     all_trades.sort(key=lambda x: int(x.get("executed_at") or 0))
     return all_trades, err_msg
@@ -275,9 +275,8 @@ def build_tax_report(
                     cur_q = spot_qty.get(pair, 0.0)
                     cur_c = spot_avg_cost.get(pair, 0.0)
                     matched_q = min(amt, cur_q) if cur_q > 0 else 0.0
-                    cost_basis = matched_q * cur_c
-                    # Fee is subtracted once in net_pnl below; compute gross gain over cost basis
-                    trade_gross = (amt * px) - cost_basis if matched_q > 0 else 0.0
+                    # Only compute gain on quantity matched against known year cost basis; fee subtracted below
+                    trade_gross = matched_q * (px - cur_c) if matched_q > 0 else 0.0
                     spot_qty[pair] = max(0.0, cur_q - amt)
 
             net_row = trade_gross - fee_q - interest
