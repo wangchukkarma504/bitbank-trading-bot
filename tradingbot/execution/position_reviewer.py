@@ -46,7 +46,7 @@ class PositionReviewer:
         self.client = bitbank_client
         self.baseline_budget_jpy = baseline_budget_jpy
 
-    def review(self, client=None) -> PositionReviewResult:
+    def review(self, client=None, allow_shorts: bool = True) -> PositionReviewResult:
         """Perform full position review and account equity audit."""
         active_client = client or self.client
         if active_client is None:
@@ -76,8 +76,8 @@ class PositionReviewer:
                     "total": free_amt + locked_amt,
                 }
 
-        # 2. Query Open Margin Positions across the 5 Pairs
-        positions_raw = active_client.margin_positions()
+        # 2. Query Open Margin Positions across the 5 Pairs (skipped in Spot Long-Only mode)
+        positions_raw = active_client.margin_positions() if allow_shorts else []
         open_positions: List[Dict[str, Any]] = []
         margin_unrealized_pnl = 0.0
 

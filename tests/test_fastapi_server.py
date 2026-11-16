@@ -181,6 +181,42 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(len(body["closed_positions"]), 1)
         self.assertEqual(body["closed_positions"][0]["order_id"], "888")
 
+    def test_goal_auto_adjust_manual_override_and_spot_only_mode(self):
+        client, controller, mock_bb = self._make_client(mode="live")
+
+        # 1. Deposit +10,000 JPY into baseline (98874.1 -> 108874.1): goals auto-adjust
+        r_dep = client.post("/api/config", json={"baseline_jpy": 108874.1})
+        self.assertEqual(r_dep.status_code, 200)
+        st = client.get("/api/status").json()
+        self.assertEqual(st["baseline_jpy"], 108874.1)
+        self.assertEqual(st["milestones"]["x2"]["target"], 218000.0)
+        self.assertEqual(st["milestones"]["x10"]["target"], 1089000.0)
+
+        # 2. Manual goal override
+        r_goal = client.post("/api/config", json={"goal_target_jpy": 350000.0})
+        self.assertEqual(r_goal.status_code, 200)
+        st2 = client.get("/api/status").json()
+        self.assertEqual(st2["goal_target_jpy"], 350000.0)
+        self.assertEqual(st2["milestones"]["x2"]["target"], 350000.0)
+
+        # Reset manual goal (0 -> back to auto-adjusted 2x)
+        client.post("/api/config", json={"goal_target_jpy": 0})
+        st3 = client.get("/api/status").json()
+        self.assertIsNone(st3["goal_target_jpy"])
+        self.assertEqual(st3["milestones"]["x2"]["target"], 218000.0)
+
+        # 3. Spot Long-Only mode disables margin_positions() and blocks SHORT entries
+        r_spot = client.post("/api/config", json={"allow_shorts": False})
+        self.assertEqual(r_spot.status_code, 200)
+        self.assertFalse(controller.orchestrator.allow_shorts)
+        st4 = client.get("/api/status").json()
+        self.assertFalse(st4["allow_shorts"])
+
+        mock_bb.margin_positions.reset_mock()
+        rev = controller.orchestrator.position_reviewer.review(client=mock_bb, allow_shorts=False)
+        mock_bb.margin_positions.assert_not_called()
+        self.assertEqual(rev.open_positions, [])
+
 
 if __name__ == "__main__":
     unittest.main()

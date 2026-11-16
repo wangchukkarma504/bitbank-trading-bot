@@ -17,6 +17,7 @@ An autonomous, regime-gated Spot Long and Margin Short trading system for the **
   - Real-time equity, PnL vs baseline, open positions, active exchange stops, and 10-pair radar signals.
   - Shows **Estimated Net Close PnL** (after 0.12% taker fee) and **If Stop Hits** loss estimates.
   - Includes one-click **Close Position** buttons (`POST /api/close-position`) to cancel resting orders on a pair and market-close immediately.
+  - **Settings Modal:** Update **Baseline Capital (JPY)** (with a `+¥10,000` deposit button), **Custom Goal Target (JPY)** (or leave `0` to auto-adjust `2x / 5x / 10x`), and **Spot Long-Only** mode for accounts without margin/short access.
   - Optional dashboard login gate via `DASHBOARD_USER` / `DASHBOARD_PASS`.
 
 ---
@@ -84,6 +85,7 @@ DASHBOARD_PASS=
 - **Run in foreground (manual):**
   ```bash
   python3 -u -m tradingbot.server --mode live --baseline 98874.1 --port 8000
+  # Add --spot-only for accounts without margin/short access
   ```
 
 ### Windows + WSL (`.bat`)

@@ -333,6 +333,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <label>Total Capital to Use (JPY) — <span id="capStatus">100% Account Equity</span></label>
       <input id="cfgCapJpy" type="number" min="0" step="100" placeholder="e.g. 100000 (0 = use 100% of account)" />
     </div>
+    <div class="field">
+      <label>Baseline Capital (JPY) — <span style="color:var(--muted);font-weight:500;">Update when depositing/withdrawing</span></label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input id="cfgBaselineJpy" type="number" min="0" step="100" placeholder="e.g. 98874.1" style="flex:1;" />
+        <button type="button" class="btn-glass" style="padding:10px 12px;white-space:nowrap;" onclick="addDeposit(10000)">+¥10,000</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Custom Goal Target (JPY) — <span style="color:var(--muted);font-weight:500;">0 = Auto-adjust (2x / 5x / 10x)</span></label>
+      <input id="cfgGoalJpy" type="number" min="0" step="1000" placeholder="0 = Auto 2x" />
+    </div>
+    <div class="field">
+      <label>Account Trading Mode</label>
+      <select id="cfgAllowShorts" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(15,23,42,0.16);background:rgba(255,255,255,0.9);font-size:14px;">
+        <option value="true">Long + Short (Spot + Margin)</option>
+        <option value="false">Spot Long-Only (No Margin / No Shorts)</option>
+      </select>
+    </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
       <button class="btn-glass" onclick="closeSettings()">Cancel</button>
       <button class="btn-primary" onclick="saveConfig()">Save & Apply</button>
@@ -545,7 +563,8 @@ async function refresh() {
 
     const ms = d.milestones;
     document.getElementById('milestonesBox').innerHTML = ['x2', 'x5', 'x10'].map((k, idx) => {
-      const m = ms[k]; const label = ['2X', '5X', '10X'][idx];
+      const m = ms[k];
+      const label = (idx === 0 && d.goal_target_jpy) ? 'GOAL' : ['2X', '5X', '10X'][idx];
       return `<div class="ms-row">
         <div class="ms-head"><span>${label} [${fmtJpy(m.target)}]</span><span>${m.pct.toFixed(1)}% (${fmtJpy(m.remaining)} left)</span></div>
         <div class="bar-bg"><div class="bar-fill" style="width:${m.pct}%"></div></div>
@@ -581,13 +600,25 @@ async function refresh() {
       `<tr><td>${s.pair}</td><td><b>${s.action}</b></td><td>${(s.conviction*100).toFixed(0)}%</td><td>${s.entry_price}</td><td>${s.stop_loss_price}</td><td>${s.take_profit_price}</td><td>${s.wick}</td><td>${s.depth_ratio}</td></tr>`
     ).join('');
 
-    document.getElementById('capStatus').textContent = d.capital_limit_jpy
+    document.getElementById('capStatus').textContent = (d.capital_limit_jpy
       ? `Cap: ${fmtJpy(d.capital_limit_jpy)} (Live Equity: ${fmtJpy(d.equity_jpy)})`
-      : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`;
+      : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`) + (d.allow_shorts === false ? ' • Spot Long-Only' : ' • Long + Short');
     const capInput = document.getElementById('cfgCapJpy');
     capInput.placeholder = `Current Live: ${fmtJpy(d.equity_jpy)} (0 = use 100%)`;
     if (d.capital_limit_jpy && !capInput.value && document.activeElement !== capInput) {
       capInput.value = d.capital_limit_jpy;
+    }
+    const baseInput = document.getElementById('cfgBaselineJpy');
+    if (baseInput && document.activeElement !== baseInput && !baseInput.dataset.dirty) {
+      baseInput.value = d.baseline_jpy;
+    }
+    const goalInput = document.getElementById('cfgGoalJpy');
+    if (goalInput && document.activeElement !== goalInput && !goalInput.dataset.dirty) {
+      goalInput.value = d.goal_target_jpy || '';
+    }
+    const shortSel = document.getElementById('cfgAllowShorts');
+    if (shortSel && document.activeElement !== shortSel && d.allow_shorts !== undefined) {
+      shortSel.value = d.allow_shorts ? 'true' : 'false';
     }
   } catch (e) {
     console.error(e);
@@ -643,10 +674,20 @@ async function removeApiKey() {
   refresh();
 }
 
+function addDeposit(amount) {
+  const el = document.getElementById('cfgBaselineJpy');
+  const cur = Number(el.value || 0);
+  el.value = (cur + amount).toFixed(1);
+  el.dataset.dirty = '1';
+}
+
 async function saveConfig() {
   const apiKey = document.getElementById('cfgApiKey').value.trim();
   const apiSecret = document.getElementById('cfgApiSecret').value.trim();
   const capRaw = document.getElementById('cfgCapJpy').value.trim();
+  const baseRaw = document.getElementById('cfgBaselineJpy').value.trim();
+  const goalRaw = document.getElementById('cfgGoalJpy').value.trim();
+  const allowShortsVal = document.getElementById('cfgAllowShorts').value;
   const payload = {};
   if (apiKey && apiSecret) {
     payload.api_key = apiKey;
@@ -658,6 +699,13 @@ async function saveConfig() {
   if (capRaw !== '') {
     payload.capital_limit_jpy = Number(capRaw);
   }
+  if (baseRaw !== '' && Number(baseRaw) > 0) {
+    payload.baseline_jpy = Number(baseRaw);
+  }
+  if (goalRaw !== '') {
+    payload.goal_target_jpy = Number(goalRaw);
+  }
+  payload.allow_shorts = (allowShortsVal === 'true');
   const r = await fetch('/api/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -666,6 +714,8 @@ async function saveConfig() {
   const res = await r.json();
   document.getElementById('cfgApiKey').value = '';
   document.getElementById('cfgApiSecret').value = '';
+  delete document.getElementById('cfgBaselineJpy').dataset.dirty;
+  delete document.getElementById('cfgGoalJpy').dataset.dirty;
   document.getElementById('cfgMsg').textContent = 'Saved: ' + (res.updated && res.updated.length ? res.updated.join(', ') : 'no changes');
   refresh();
 }

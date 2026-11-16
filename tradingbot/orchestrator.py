@@ -92,10 +92,12 @@ class TradingOrchestrator:
         pairs: Optional[List[str]] = None,
         custom_logger: Optional[logging.Logger] = None,
         capital_limit_jpy: Optional[float] = None,
+        allow_shorts: bool = True,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
         self.capital_limit_jpy: Optional[float] = capital_limit_jpy
+        self.allow_shorts: bool = allow_shorts
         self.mode = mode.lower()
         self.dry_run = (self.mode == "dry-run")
         self.pairs = pairs or list(self.DEFAULT_PAIRS)
@@ -267,7 +269,9 @@ class TradingOrchestrator:
         # Poll live equity, collateral, open positions, active exchange stop orders
         review_query_failed = False
         try:
-            review_res = self.safe_api_call(self.position_reviewer.review, client=self.client)
+            review_res = self.safe_api_call(
+                self.position_reviewer.review, client=self.client, allow_shorts=self.allow_shorts
+            )
         except Exception as e:
             self.logger.error(f"Position review query failed: {e}")
             review_query_failed = True
@@ -508,7 +512,7 @@ class TradingOrchestrator:
                     continue
                 if sig.action not in ("SHORT", "LONG"):
                     continue
-                if sig.action == "SHORT" and pair not in MARGIN_PAIRS:
+                if sig.action == "SHORT" and (not self.allow_shorts or pair not in MARGIN_PAIRS):
                     continue
                 sig_side = "short" if sig.action == "SHORT" else "long"
                 eff_conv = self.loss_learner.adjust_signal_conviction(

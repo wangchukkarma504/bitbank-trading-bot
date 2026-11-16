@@ -93,6 +93,9 @@ class ConfigRequest(BaseModel):
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
     capital_limit_jpy: Optional[float] = None
+    baseline_jpy: Optional[float] = None
+    goal_target_jpy: Optional[float] = None
+    allow_shorts: Optional[bool] = None
 
 
 class ClosePositionRequest(BaseModel):
@@ -123,6 +126,7 @@ class BotController:
         self.last_error: Optional[str] = None
         self.last_tick_ts: float = 0.0
         self.last_emergency_report: Optional[Dict[str, Any]] = None
+        self.goal_target_jpy: Optional[float] = None
         self.equity_history: List[Dict[str, Any]] = []
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -138,6 +142,17 @@ class BotController:
             cap = cfg.get("capital_limit_jpy")
             if cap is not None and float(cap) > 0:
                 self.orchestrator.capital_limit_jpy = float(cap)
+            base = cfg.get("baseline_jpy")
+            if base is not None and float(base) > 0:
+                bval = float(base)
+                self.orchestrator.baseline_budget_jpy = bval
+                self.orchestrator.position_reviewer.baseline_budget_jpy = bval
+                self.orchestrator.dashboard.starting_budget = bval
+            goal = cfg.get("goal_target_jpy")
+            if goal is not None and float(goal) > 0:
+                self.goal_target_jpy = float(goal)
+            if "allow_shorts" in cfg and cfg["allow_shorts"] is not None:
+                self.orchestrator.allow_shorts = bool(cfg["allow_shorts"])
         except Exception as e:
             logger.warning(f"Could not load bot config: {e}")
 
@@ -146,7 +161,16 @@ class BotController:
             return
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump({"capital_limit_jpy": self.orchestrator.capital_limit_jpy}, f, indent=2)
+                json.dump(
+                    {
+                        "capital_limit_jpy": self.orchestrator.capital_limit_jpy,
+                        "baseline_jpy": self.orchestrator.baseline_budget_jpy,
+                        "goal_target_jpy": self.goal_target_jpy,
+                        "allow_shorts": self.orchestrator.allow_shorts,
+                    },
+                    f,
+                    indent=2,
+                )
         except Exception as e:
             logger.warning(f"Could not save bot config: {e}")
 
@@ -155,8 +179,11 @@ class BotController:
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
         capital_limit_jpy: Optional[float] = None,
+        baseline_jpy: Optional[float] = None,
+        goal_target_jpy: Optional[float] = None,
+        allow_shorts: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Update Bitbank API credentials and/or capital limit live."""
+        """Update Bitbank API credentials, capital limit, baseline, goal, and/or short mode live."""
         changed: List[str] = []
         with self.lock:
             if api_key and api_secret:
@@ -181,18 +208,40 @@ class BotController:
                 if capital_limit_jpy > 0:
                     cap_val = float(capital_limit_jpy)
                     self.orchestrator.capital_limit_jpy = cap_val
-                    self.orchestrator.baseline_budget_jpy = cap_val
-                    self.orchestrator.position_reviewer.baseline_budget_jpy = cap_val
-                    self.orchestrator.dashboard.starting_budget = cap_val
+                    if baseline_jpy is None:
+                        self.orchestrator.baseline_budget_jpy = cap_val
+                        self.orchestrator.position_reviewer.baseline_budget_jpy = cap_val
+                        self.orchestrator.dashboard.starting_budget = cap_val
                 else:
                     self.orchestrator.capital_limit_jpy = None
                 self._save_config()
                 changed.append("capital_limit_jpy")
 
+            if baseline_jpy is not None and baseline_jpy > 0:
+                bval = float(baseline_jpy)
+                self.orchestrator.baseline_budget_jpy = bval
+                self.orchestrator.position_reviewer.baseline_budget_jpy = bval
+                self.orchestrator.dashboard.starting_budget = bval
+                self._save_config()
+                changed.append("baseline_jpy")
+
+            if goal_target_jpy is not None:
+                self.goal_target_jpy = float(goal_target_jpy) if goal_target_jpy > 0 else None
+                self._save_config()
+                changed.append("goal_target_jpy")
+
+            if allow_shorts is not None:
+                self.orchestrator.allow_shorts = bool(allow_shorts)
+                self._save_config()
+                changed.append("allow_shorts")
+
         return {
             "ok": True,
             "updated": changed,
             "capital_limit_jpy": self.orchestrator.capital_limit_jpy,
+            "baseline_jpy": self.orchestrator.baseline_budget_jpy,
+            "goal_target_jpy": self.goal_target_jpy,
+            "allow_shorts": self.orchestrator.allow_shorts,
         }
 
     def remove_api_key(self) -> Dict[str, Any]:
@@ -455,12 +504,17 @@ class BotController:
             in_trade_est_net += est_net
         in_trade_pct = (in_trade_pnl / in_trade_notional * 100.0) if in_trade_notional > 0 else 0.0
 
-        if baseline >= 50000.0:
-            t2x = 200000.0 if baseline <= 120000.0 else round(baseline * 2.0, -3)
-            t5x = 500000.0 if baseline <= 120000.0 else round(baseline * 5.0, -3)
-            t10x = 1000000.0 if baseline <= 120000.0 else round(baseline * 10.0, -3)
+        if 95000.0 <= baseline <= 105000.0:
+            t2x, t5x, t10x = 200000.0, 500000.0, 1000000.0
+        elif baseline >= 10000.0:
+            t2x = float(round(baseline * 2.0, -3))
+            t5x = float(round(baseline * 5.0, -3))
+            t10x = float(round(baseline * 10.0, -3))
         else:
             t2x, t5x, t10x = 20000.0, 50000.0, 100000.0
+
+        if self.goal_target_jpy is not None and self.goal_target_jpy > 0:
+            t2x = float(self.goal_target_jpy)
 
         def _ms(target: float) -> Dict[str, Any]:
             req = max(1.0, target - baseline)
@@ -545,6 +599,8 @@ class BotController:
             "api_key_masked": api_key_masked,
             "capital_limit_jpy": orch.capital_limit_jpy,
             "baseline_jpy": round(baseline, 2),
+            "goal_target_jpy": self.goal_target_jpy,
+            "allow_shorts": orch.allow_shorts,
             "equity_jpy": round(equity, 2),
             "free_cash_jpy": round(free_cash, 2),
             "buying_power_jpy": round(buying_power, 2),
@@ -725,6 +781,9 @@ def create_app(controller: BotController) -> FastAPI:
                 api_key=req.api_key,
                 api_secret=req.api_secret,
                 capital_limit_jpy=req.capital_limit_jpy,
+                baseline_jpy=req.baseline_jpy,
+                goal_target_jpy=req.goal_target_jpy,
+                allow_shorts=req.allow_shorts,
             )
         )
 
@@ -739,6 +798,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bitbank FastAPI Control Server & Web Dashboard")
     parser.add_argument("--mode", choices=["live", "dry-run"], default="dry-run")
     parser.add_argument("--baseline", type=float, default=98874.1)
+    parser.add_argument("--spot-only", action="store_true", help="Disable margin shorts (Spot Long-Only mode)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
@@ -749,7 +809,11 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     _load_env_file(".env")
-    orch = TradingOrchestrator(baseline_budget_jpy=args.baseline, mode=args.mode)
+    orch = TradingOrchestrator(
+        baseline_budget_jpy=args.baseline,
+        mode=args.mode,
+        allow_shorts=not args.spot_only,
+    )
     controller = BotController(orch, auto_start=True)
     app = create_app(controller)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
