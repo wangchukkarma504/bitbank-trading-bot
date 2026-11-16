@@ -32,6 +32,13 @@ from tradingbot.bitbank import Bitbank
 from tradingbot.dashboard_html import DASHBOARD_HTML, render_login_html
 from tradingbot.models import MARGIN_PAIRS, PairConfig, SPOT_ONLY_PAIRS, SUPPORTED_PAIRS
 from tradingbot.orchestrator import TradingOrchestrator
+from tradingbot.tax_japan import (
+    TaxProfile,
+    build_tax_report,
+    load_tax_profile,
+    render_tax_csv,
+    save_tax_profile,
+)
 
 
 logger = logging.getLogger("FastAPIServer")
@@ -106,6 +113,16 @@ class ClosePositionRequest(BaseModel):
     position_side: Optional[str] = None
 
 
+class TaxProfileRequest(BaseModel):
+    tax_year: Optional[int] = None
+    employment_type: Optional[str] = None
+    annual_salary_jpy: Optional[float] = None
+    other_misc_income_jpy: Optional[float] = None
+    filing_threshold_jpy: Optional[float] = None
+    taxpayer_name: Optional[str] = None
+    tax_office: Optional[str] = None
+
+
 class BotController:
     """Thread-safe controller wrapping TradingOrchestrator + equity history + emergency stop."""
 
@@ -117,12 +134,16 @@ class BotController:
         history_path: str = "equity_history.json",
         config_path: str = "bot_config.json",
         env_path: str = ".env",
+        tax_profile_path: str = "tax_profile.json",
+        trade_log_path: str = "trade_audit_log.json",
         auto_start: bool = True,
     ):
         self.orchestrator = orchestrator
         self.history_path = history_path
         self.config_path = config_path
         self.env_path = env_path
+        self.tax_profile_path = tax_profile_path
+        self.trade_log_path = trade_log_path
         self.lock = threading.Lock()
         self.running: bool = auto_start
         self.emergency_stopped: bool = False
@@ -131,10 +152,13 @@ class BotController:
         self.last_emergency_report: Optional[Dict[str, Any]] = None
         self.goal_target_jpy: Optional[float] = None
         self.equity_history: List[Dict[str, Any]] = []
+        self.trade_audit: List[Dict[str, Any]] = []
+        self._last_sync_ts: float = 0.0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._load_history()
         self._load_config()
+        self._load_trade_audit()
 
     def _load_config(self) -> None:
         if not self.config_path or not os.path.exists(self.config_path):
@@ -315,6 +339,91 @@ class BotController:
         except Exception as e:
             logger.warning(f"Could not save equity history: {e}")
 
+    def _load_trade_audit(self) -> None:
+        if not self.trade_log_path or not os.path.exists(self.trade_log_path):
+            return
+        try:
+            with open(self.trade_log_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self.trade_audit = data[-300:]
+        except Exception as e:
+            logger.warning(f"Could not load trade audit log: {e}")
+
+    def _save_trade_audit(self) -> None:
+        if not self.trade_log_path:
+            return
+        try:
+            with open(self.trade_log_path, "w", encoding="utf-8") as f:
+                json.dump(self.trade_audit[-300:], f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save trade audit log: {e}")
+
+    def sync_exchange_trades(self) -> int:
+        """Sync recent Bitbank fills (including manual trades while paused/off) into local audit log."""
+        with self.lock:
+            client = self.orchestrator.client
+            dry_run = self.orchestrator.dry_run
+            lessons = list(self.orchestrator.loss_learner.lessons) if self.orchestrator.loss_learner else []
+        if dry_run or client is None or not getattr(client, "key", None):
+            return 0
+        try:
+            res = client._get("/user/spot/trade_history", {"count": "100", "order": "desc"})
+            trades = res.get("trades", []) if isinstance(res, dict) else []
+        except Exception as e:
+            logger.debug(f"Trade history sync skipped: {e}")
+            return 0
+        if not isinstance(trades, list) or not trades:
+            return 0
+
+        jst = timezone(timedelta(hours=9))
+        bot_closes = [
+            (l.pair, float(l.timestamp))
+            for l in lessons
+        ]
+        added = 0
+        with self.lock:
+            seen_ids = {str(x.get("trade_id")) for x in self.trade_audit if x.get("trade_id") is not None}
+            for t in reversed(trades):
+                tid = t.get("trade_id")
+                if tid is None or str(tid) in seen_ids:
+                    continue
+                pair = str(t.get("pair") or "")
+                side = str(t.get("side") or "")
+                pos_side = t.get("position_side")
+                amt = float(t.get("amount") or 0.0)
+                px = float(t.get("price") or 0.0)
+                fee_q = float(t.get("fee_occurred_amount_quote") or t.get("fee_amount_quote") or 0.0)
+                interest = float(t.get("interest") or 0.0)
+                raw_pnl = float(t.get("profit_loss") or 0.0)
+                net_pnl = round(raw_pnl - fee_q - interest, 2) if pos_side else 0.0
+                ts_ms = int(t.get("executed_at") or 0)
+                ts_sec = int(ts_ms / 1000) if ts_ms > 0 else int(time.time())
+                is_bot = any(bp == pair and abs(bts - ts_sec) <= 25 for bp, bts in bot_closes)
+                self.trade_audit.append({
+                    "trade_id": tid,
+                    "ts": ts_sec,
+                    "time_jst": datetime.fromtimestamp(ts_sec, tz=jst).strftime("%Y-%m-%d %H:%M:%S"),
+                    "pair": pair,
+                    "side": f"{side} ({pos_side})" if pos_side else f"{side} (spot)",
+                    "position_side": pos_side,
+                    "amount": amt,
+                    "price_jpy": px,
+                    "gross_pnl_jpy": round(raw_pnl, 2),
+                    "fee_jpy": round(fee_q, 2),
+                    "interest_jpy": round(interest, 2),
+                    "net_pnl_jpy": net_pnl,
+                    "source": "bot" if is_bot else "manual",
+                })
+                seen_ids.add(str(tid))
+                added += 1
+            if added > 0:
+                self.trade_audit.sort(key=lambda r: int(r.get("ts") or 0))
+                self.trade_audit = self.trade_audit[-300:]
+                self._save_trade_audit()
+            self._last_sync_ts = time.time()
+        return added
+
     def start_loop(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
@@ -328,7 +437,9 @@ class BotController:
             self._thread.join(timeout=3.0)
 
     def _run_loop(self) -> None:
+        self.sync_exchange_trades()
         while not self._stop_event.is_set():
+            now = time.time()
             if self.running and not self.emergency_stopped:
                 try:
                     res = self.orchestrator.tick()
@@ -341,15 +452,35 @@ class BotController:
                         if len(self.equity_history) > self.MAX_HISTORY_POINTS:
                             self.equity_history = self.equity_history[-self.MAX_HISTORY_POINTS:]
                         self._save_history()
+                    if now - self._last_sync_ts >= 60.0:
+                        self.sync_exchange_trades()
                 except Exception as e:
                     logger.error(f"Server tick error: {e}", exc_info=True)
                     with self.lock:
                         self.last_error = str(e)
+            elif not self.emergency_stopped and (now - self._last_sync_ts >= 60.0):
+                # Keep equity curve & manual Bitbank trades synced even while bot is PAUSED
+                try:
+                    if not self.orchestrator.dry_run and getattr(self.orchestrator.client, "key", None):
+                        rev = self.orchestrator.position_reviewer.review()
+                        self.orchestrator.last_review = rev
+                        eq = float(rev.total_equity_jpy)
+                        with self.lock:
+                            self.equity_history.append({"ts": int(now), "equity": round(eq, 2)})
+                            if len(self.equity_history) > self.MAX_HISTORY_POINTS:
+                                self.equity_history = self.equity_history[-self.MAX_HISTORY_POINTS:]
+                            self._save_history()
+                    self.sync_exchange_trades()
+                except Exception as e:
+                    logger.debug(f"Paused sync skipped: {e}")
+                    with self.lock:
+                        self._last_sync_ts = time.time()
             self._stop_event.wait(self.orchestrator.TICK_INTERVAL_SEC)
 
     def pause(self) -> Dict[str, Any]:
         with self.lock:
             self.running = False
+            self._last_sync_ts = 0.0
         return {"status": "PAUSED", "running": self.running}
 
     def resume(self) -> Dict[str, Any]:
@@ -358,6 +489,7 @@ class BotController:
             self.orchestrator._circuit_breaker_until = 0.0
             self.orchestrator._global_cooldown_until = 0.0
             self.running = True
+            self._last_sync_ts = 0.0
         return {"status": "RUNNING", "running": self.running}
 
     def emergency_stop_all(self) -> Dict[str, Any]:
@@ -630,9 +762,36 @@ class BotController:
                 "equity_after": round(float(l.exit_equity_jpy), 2),
                 "is_loss": bool(l.is_loss),
                 "ts": int(l.timestamp),
+                "source": "bot",
             }
             for l in (orch.loss_learner.lessons[-16:] if orch.loss_learner else [])
         ]
+
+        with self.lock:
+            audit_copy = list(self.trade_audit)
+
+        for row in audit_copy:
+            if row.get("source") != "manual" or not row.get("position_side"):
+                continue
+            pnl = float(row.get("net_pnl_jpy") or 0.0)
+            if abs(pnl) < 0.01:
+                continue
+            ts_row = int(row.get("ts") or 0)
+            pair_row = str(row.get("pair") or "")
+            if any(h["pair"] == pair_row and abs(h["ts"] - ts_row) <= 25 for h in trade_history):
+                continue
+            trade_history.append({
+                "pair": pair_row,
+                "side": str(row.get("position_side") or row.get("side") or ""),
+                "pnl_jpy": round(pnl, 2),
+                "pnl_pct": 0.0,
+                "equity_after": round(equity, 2),
+                "is_loss": pnl < 0,
+                "ts": ts_row,
+                "source": "manual",
+            })
+        trade_history.sort(key=lambda x: int(x.get("ts") or 0))
+        trade_history = trade_history[-16:]
 
         with self.lock:
             state_label = (
@@ -713,6 +872,50 @@ class BotController:
             return {"pair": pair_clean, "tf": tf_clean, "candles": candles}
         except Exception as e:
             return {"pair": pair_clean, "tf": tf_clean, "candles": [], "error": str(e)}
+
+    def get_tax_report(self, year: Optional[int] = None) -> Dict[str, Any]:
+        """Build the Japan Crypto Tax (確定申告 / 雑所得) report for the selected year."""
+        with self.lock:
+            prof = load_tax_profile(self.tax_profile_path)
+            if year is not None and year > 2000:
+                prof.tax_year = int(year)
+            client = self.orchestrator.client
+            lessons = list(self.orchestrator.loss_learner.lessons)
+            cache_path = f"tax_cache_{prof.tax_year}.json" if self.tax_profile_path else ""
+        return build_tax_report(client, prof, fallback_lessons=lessons, cache_path=cache_path)
+
+    def update_tax_profile(
+        self,
+        tax_year: Optional[int] = None,
+        employment_type: Optional[str] = None,
+        annual_salary_jpy: Optional[float] = None,
+        other_misc_income_jpy: Optional[float] = None,
+        filing_threshold_jpy: Optional[float] = None,
+        taxpayer_name: Optional[str] = None,
+        tax_office: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update and persist Japan tax details, returning the recalculated tax report."""
+        with self.lock:
+            prof = load_tax_profile(self.tax_profile_path)
+            if tax_year is not None and int(tax_year) > 2000:
+                prof.tax_year = int(tax_year)
+            if employment_type in ("salary", "other"):
+                prof.employment_type = str(employment_type)
+            if annual_salary_jpy is not None and float(annual_salary_jpy) >= 0:
+                prof.annual_salary_jpy = float(annual_salary_jpy)
+            if other_misc_income_jpy is not None and float(other_misc_income_jpy) >= 0:
+                prof.other_misc_income_jpy = float(other_misc_income_jpy)
+            if filing_threshold_jpy is not None and float(filing_threshold_jpy) >= 0:
+                prof.filing_threshold_jpy = float(filing_threshold_jpy)
+            if taxpayer_name is not None:
+                prof.taxpayer_name = taxpayer_name.strip()[:80]
+            if tax_office is not None:
+                prof.tax_office = tax_office.strip()[:80]
+            save_tax_profile(prof, self.tax_profile_path)
+            client = self.orchestrator.client
+            lessons = list(self.orchestrator.loss_learner.lessons)
+            cache_path = f"tax_cache_{prof.tax_year}.json" if self.tax_profile_path else ""
+        return build_tax_report(client, prof, fallback_lessons=lessons, cache_path=cache_path)
 
 
 # DASHBOARD_HTML imported from tradingbot.dashboard_html
@@ -939,6 +1142,37 @@ self.addEventListener('fetch', (e) => {
     @app.post("/api/config/remove-key", dependencies=[Depends(require_auth)])
     def api_remove_key():
         return JSONResponse(controller.remove_api_key())
+
+    @app.get("/api/tax", dependencies=[Depends(require_auth)])
+    def api_tax_report(year: Optional[int] = None):
+        return JSONResponse(controller.get_tax_report(year=year))
+
+    @app.post("/api/tax/profile", dependencies=[Depends(require_auth)])
+    def api_tax_profile(req: TaxProfileRequest):
+        return JSONResponse(
+            controller.update_tax_profile(
+                tax_year=req.tax_year,
+                employment_type=req.employment_type,
+                annual_salary_jpy=req.annual_salary_jpy,
+                other_misc_income_jpy=req.other_misc_income_jpy,
+                filing_threshold_jpy=req.filing_threshold_jpy,
+                taxpayer_name=req.taxpayer_name,
+                tax_office=req.tax_office,
+            )
+        )
+
+    @app.get("/api/tax/csv", dependencies=[Depends(require_auth)])
+    def api_tax_csv(year: Optional[int] = None):
+        report = controller.get_tax_report(year=year)
+        csv_text = render_tax_csv(report)
+        tax_year = report.get("tax_year", 2026)
+        return Response(
+            content=csv_text,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="bitbank_tax_{tax_year}.csv"'
+            },
+        )
 
     return app
 

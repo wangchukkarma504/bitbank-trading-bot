@@ -261,6 +261,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="badge" id="apiBadge"><span class="dot offline"></span>API: CHECKING</span>
         <span class="badge" id="stateBadge">LOADING</span>
         <button class="btn-glass" onclick="closeHeaderMenu(); openSettings()">Settings</button>
+        <button class="btn-glass" onclick="closeHeaderMenu(); scrollToTax()">Japan Tax (確定申告)</button>
         <button class="btn-glass" onclick="togglePause()" id="pauseBtn">Pause Bot</button>
         <button class="btn-glass" id="installPwaBtn" onclick="installPwa()" style="display:none;color:#2563eb;font-weight:700;">Install App</button>
         <button class="btn-glass" onclick="window.location.href='/logout'">Logout</button>
@@ -389,6 +390,114 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <tbody id="radarBody"></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card" id="taxCard" style="margin-top:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+      <div>
+        <h2 style="margin:0;">Japan Crypto Tax Center (確定申告 / 雑所得)</h2>
+        <div id="taxDataSourceNote" style="font-size:12px;color:var(--muted);margin-top:4px;">Loading Bitbank realized trade ledger...</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span class="badge" id="taxFilingBadge">CHECKING...</span>
+        <button class="btn-glass" style="padding:7px 12px;font-size:12px;" onclick="loadTaxReport()">Refresh Data</button>
+        <button class="btn-primary" style="padding:7px 12px;font-size:12px;" onclick="downloadTaxCsv()">Download CSV</button>
+      </div>
+    </div>
+
+    <div class="ms-row" style="margin-bottom:16px;">
+      <div class="ms-head">
+        <span id="taxThresholdLabel">¥200,000 Salaried National Filing Threshold</span>
+        <span id="taxThresholdPct">0%</span>
+      </div>
+      <div class="bar-bg"><div id="taxThresholdBar" style="height:100%;width:0%;background:linear-gradient(90deg,#16a34a,#22c55e);border-radius:999px;transition:width .35s ease;"></div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px;">
+      <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.65);border:1px solid rgba(15,23,42,0.08);">
+        <div class="kpi-label">Net Taxable Profit (雑所得)</div>
+        <div class="kpi-val" id="taxNetVal" style="font-size:20px;">--</div>
+        <div class="kpi-sub" id="taxGrossSub" style="font-size:11.5px;">Gross: --</div>
+      </div>
+      <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.65);border:1px solid rgba(15,23,42,0.08);">
+        <div class="kpi-label">Fees / Maker Rebates</div>
+        <div class="kpi-val" id="taxFeesVal" style="font-size:20px;">--</div>
+        <div class="kpi-sub" id="taxIntSub" style="font-size:11.5px;">Interest: --</div>
+      </div>
+      <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.65);border:1px solid rgba(15,23,42,0.08);">
+        <div class="kpi-label">Est. Tax Reserve (納税目安)</div>
+        <div class="kpi-val" id="taxEstVal" style="font-size:20px;">--</div>
+        <div class="kpi-sub" id="taxRateSub" style="font-size:11.5px;">Eff. Rate: --</div>
+      </div>
+      <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.65);border:1px solid rgba(15,23,42,0.08);">
+        <div class="kpi-label">Remaining Under ¥200k</div>
+        <div class="kpi-val" id="taxRemVal" style="font-size:20px;">--</div>
+        <div class="kpi-sub" id="taxTradesSub" style="font-size:11.5px;">Trades: 0</div>
+      </div>
+    </div>
+
+    <div class="sec-card" style="margin-bottom:14px;">
+      <div class="sec-title">Your Japan Tax Profile (Saved Locally, Never Uploaded)</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:10px;">
+        <div class="field" style="margin:0;">
+          <label for="taxYearSel">Tax Year</label>
+          <select id="taxYearSel" onchange="loadTaxReport(this.value)" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(15,23,42,0.14);background:rgba(255,255,255,0.95);font-size:14px;">
+            <option value="2026">2026 (令和8年)</option>
+            <option value="2025">2025 (令和7年)</option>
+            <option value="2024">2024 (令和6年)</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="taxEmpSel">Work / Filing Status</label>
+          <select id="taxEmpSel" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(15,23,42,0.14);background:rgba(255,255,255,0.95);font-size:14px;">
+            <option value="salary">Company Does Job Tax (年末調整あり・¥200k rule)</option>
+            <option value="other">Self-Employed / Own Filing</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="taxSalaryJpy">Annual Salary (JPY, optional)</label>
+          <input id="taxSalaryJpy" type="number" min="0" step="100000" placeholder="e.g. 5000000" />
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="taxOtherMiscJpy">Other Side / Misc Income (JPY)</label>
+          <input id="taxOtherMiscJpy" type="number" min="0" step="1000" placeholder="0" />
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="taxName">Taxpayer Name (optional)</label>
+          <input id="taxName" type="text" placeholder="For CSV export" />
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="taxOffice">Tax Office / 税務署 (optional)</label>
+          <input id="taxOffice" type="text" placeholder="e.g. Shibuya / 新宿" />
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;">
+        <button class="btn-primary" style="padding:9px 16px;" onclick="saveTaxProfile()">Save Tax Details &amp; Recalculate</button>
+        <span id="taxMsg" style="font-size:12.5px;font-weight:700;color:var(--green);"></span>
+      </div>
+      <div id="taxResidentNote" class="hint" style="margin-top:8px;"></div>
+    </div>
+
+    <details style="margin-bottom:10px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:800;color:var(--text);">Monthly Breakdown &amp; Realized Bitbank Trade Ledger</summary>
+      <div style="margin-top:10px;">
+        <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;">MONTHLY SUMMARY (JST)</div>
+        <div class="table-wrap" style="margin-bottom:14px;">
+          <table>
+            <thead><tr><th>Month</th><th>Trades</th><th>Gross PnL</th><th>Fees/Rebate</th><th>Interest</th><th>Net Profit</th></tr></thead>
+            <tbody id="taxMonthlyBody"></tbody>
+          </table>
+        </div>
+        <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;">REALIZED TRADE LEDGER (LATEST 100)</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time (JST)</th><th>Pair</th><th>Side</th><th>Amount</th><th>Price</th><th>Gross PnL</th><th>Fee</th><th>Net PnL</th></tr></thead>
+            <tbody id="taxLedgerBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    <div class="hint">Uses Bitbank realized PnL for margin trades and moving-average cost basis (移動平均法) for spot sells. Estimate only — even if national 所得税 is exempt under ¥200k, ~10% local 住民税 still applies. Confirm final filing via e-Tax / 確定申告書等作成コーナー or a licensed 税理士.</div>
   </div>
 </div>
 
@@ -1173,6 +1282,173 @@ window.addEventListener('resize', () => {
 
 refresh();
 setInterval(refresh, 5000);
+loadTaxReport();
+
+function scrollToTax() {
+  const el = document.getElementById('taxCard');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  loadTaxReport();
+}
+
+function renderTaxReport(rep) {
+  if (!rep) return;
+  const est = rep.tax_estimate || {};
+  const prof = rep.profile || {};
+
+  const yrSel = document.getElementById('taxYearSel');
+  if (yrSel && prof.tax_year) yrSel.value = String(prof.tax_year);
+  const empSel = document.getElementById('taxEmpSel');
+  if (empSel && prof.employment_type) empSel.value = prof.employment_type;
+  const salIn = document.getElementById('taxSalaryJpy');
+  if (salIn && document.activeElement !== salIn) salIn.value = prof.annual_salary_jpy > 0 ? Math.round(prof.annual_salary_jpy) : '';
+  const othIn = document.getElementById('taxOtherMiscJpy');
+  if (othIn && document.activeElement !== othIn) othIn.value = prof.other_misc_income_jpy > 0 ? Math.round(prof.other_misc_income_jpy) : '';
+  const nameIn = document.getElementById('taxName');
+  if (nameIn && document.activeElement !== nameIn) nameIn.value = prof.taxpayer_name || '';
+  const offIn = document.getElementById('taxOffice');
+  if (offIn && document.activeElement !== offIn) offIn.value = prof.tax_office || '';
+
+  const req = !!est.national_filing_required;
+  const badge = document.getElementById('taxFilingBadge');
+  if (badge) {
+    if (req) {
+      badge.textContent = 'FILING REQUIRED (確定申告)';
+      badge.style.background = 'rgba(220,38,38,0.12)';
+      badge.style.color = '#b91c1c';
+    } else {
+      badge.textContent = 'UNDER ¥200K THRESHOLD';
+      badge.style.background = 'rgba(22,163,74,0.12)';
+      badge.style.color = '#15803d';
+    }
+  }
+
+  const pct = Math.max(0, Math.min(100, Number(est.threshold_pct || 0)));
+  const pctEl = document.getElementById('taxThresholdPct');
+  if (pctEl) pctEl.textContent = pct.toFixed(1) + '% of ¥200,000';
+  const barEl = document.getElementById('taxThresholdBar');
+  if (barEl) {
+    barEl.style.width = pct + '%';
+    barEl.style.background = req
+      ? 'linear-gradient(90deg,#ef4444,#b91c1c)'
+      : 'linear-gradient(90deg,#16a34a,#22c55e)';
+  }
+
+  const net = Number(rep.net_realized_profit_jpy || 0);
+  const netEl = document.getElementById('taxNetVal');
+  if (netEl) {
+    netEl.textContent = (net >= 0 ? '+' : '') + fmtJpy(net);
+    netEl.className = 'kpi-val ' + (net >= 0 ? 'pos' : 'neg');
+  }
+  const grossSub = document.getElementById('taxGrossSub');
+  if (grossSub) grossSub.textContent = 'Gross PnL: ' + fmtJpy(rep.gross_realized_pnl_jpy || 0);
+
+  const fees = Number(rep.total_fees_jpy || 0);
+  const feesEl = document.getElementById('taxFeesVal');
+  if (feesEl) {
+    feesEl.textContent = (fees > 0 ? '-' : fees < 0 ? '+' : '') + fmtJpy(Math.abs(fees));
+    feesEl.className = 'kpi-val ' + (fees <= 0 ? 'pos' : '');
+  }
+  const intSub = document.getElementById('taxIntSub');
+  if (intSub) intSub.textContent = (fees < 0 ? 'Maker rebates earned! ' : '') + 'Interest: ' + fmtJpy(rep.total_interest_jpy || 0);
+
+  const estEl = document.getElementById('taxEstVal');
+  if (estEl) estEl.textContent = fmtJpy(est.estimated_tax_jpy || 0);
+  const rateSub = document.getElementById('taxRateSub');
+  if (rateSub) rateSub.textContent = 'Eff. Rate: ' + Number(est.effective_rate_pct || 0).toFixed(1) + '%';
+
+  const remEl = document.getElementById('taxRemVal');
+  if (remEl) remEl.textContent = fmtJpy(est.remaining_to_threshold_jpy || 0);
+  const trSub = document.getElementById('taxTradesSub');
+  if (trSub) trSub.textContent = 'Fills this year: ' + (rep.total_trades || 0);
+
+  const srcNote = document.getElementById('taxDataSourceNote');
+  if (srcNote) {
+    srcNote.textContent = rep.data_source === 'bitbank_trade_history'
+      ? `Synced directly from Bitbank ${rep.tax_year} JST trade history`
+      : `Offline/Fallback source (${rep.data_source || 'local'})`;
+  }
+  const resNote = document.getElementById('taxResidentNote');
+  if (resNote) resNote.textContent = est.resident_tax_note || '';
+
+  const mBody = document.getElementById('taxMonthlyBody');
+  if (mBody) {
+    const mRows = rep.monthly_breakdown || [];
+    mBody.innerHTML = mRows.length === 0
+      ? '<tr><td colspan="6" style="color:var(--muted);">No realized trades recorded for this year yet.</td></tr>'
+      : mRows.map(m => `<tr>
+          <td><b>${m.month}</b></td>
+          <td>${m.trades}</td>
+          <td>${fmtJpy(m.gross_pnl_jpy)}</td>
+          <td>${fmtJpy(m.fees_jpy)}</td>
+          <td>${fmtJpy(m.interest_jpy)}</td>
+          <td class="${m.net_pnl_jpy >= 0 ? 'pos' : 'neg'}"><b>${(m.net_pnl_jpy >= 0 ? '+' : '') + fmtJpy(m.net_pnl_jpy)}</b></td>
+        </tr>`).join('');
+  }
+
+  const lBody = document.getElementById('taxLedgerBody');
+  if (lBody) {
+    const lRows = rep.recent_ledger || [];
+    lBody.innerHTML = lRows.length === 0
+      ? '<tr><td colspan="8" style="color:var(--muted);">No fills found for this tax year.</td></tr>'
+      : lRows.map(r => `<tr>
+          <td>${r.time_jst || ''}</td>
+          <td><b>${(r.pair || '').toUpperCase().replace('_JPY', '')}</b></td>
+          <td>${r.side || ''}</td>
+          <td>${Number(r.amount || 0).toFixed(4)}</td>
+          <td>${fmtPx(r.price_jpy || 0)}</td>
+          <td>${fmtJpy(r.gross_pnl_jpy || 0)}</td>
+          <td>${fmtJpy(r.fee_jpy || 0)}</td>
+          <td class="${r.net_pnl_jpy >= 0 ? 'pos' : 'neg'}"><b>${(r.net_pnl_jpy >= 0 ? '+' : '') + fmtJpy(r.net_pnl_jpy)}</b></td>
+        </tr>`).join('');
+  }
+}
+
+async function loadTaxReport(yearVal) {
+  try {
+    const yr = yearVal || (document.getElementById('taxYearSel') ? document.getElementById('taxYearSel').value : '');
+    const qs = yr ? ('?year=' + encodeURIComponent(yr)) : '';
+    const rep = await api('/api/tax' + qs);
+    renderTaxReport(rep);
+  } catch (e) {
+    const el = document.getElementById('taxDataSourceNote');
+    if (el) el.textContent = 'Could not load tax report yet.';
+  }
+}
+
+async function saveTaxProfile() {
+  const msg = document.getElementById('taxMsg');
+  try {
+    const payload = {
+      tax_year: Number(document.getElementById('taxYearSel').value || 2026),
+      employment_type: document.getElementById('taxEmpSel').value || 'salary',
+      annual_salary_jpy: Number(document.getElementById('taxSalaryJpy').value || 0),
+      other_misc_income_jpy: Number(document.getElementById('taxOtherMiscJpy').value || 0),
+      taxpayer_name: document.getElementById('taxName').value || '',
+      tax_office: document.getElementById('taxOffice').value || '',
+    };
+    const rep = await api('/api/tax/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    renderTaxReport(rep);
+    if (msg) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = 'Saved & recalculated!';
+      setTimeout(() => { msg.textContent = ''; }, 3000);
+    }
+  } catch (e) {
+    if (msg) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Save failed: ' + (e.message || e);
+    }
+  }
+}
+
+function downloadTaxCsv() {
+  const yr = document.getElementById('taxYearSel') ? document.getElementById('taxYearSel').value : '';
+  window.location.href = '/api/tax/csv' + (yr ? ('?year=' + encodeURIComponent(yr)) : '');
+}
 
 let deferredPwaPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {

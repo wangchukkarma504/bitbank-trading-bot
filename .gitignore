@@ -22,6 +22,9 @@ monitor_log.md
 equity_history.json
 loss_lessons.json
 bot_config.json
+tax_profile.json
+tax_cache_*.json
+trade_audit_log.json
 state.json
 state_paper.json
 

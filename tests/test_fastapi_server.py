@@ -21,7 +21,15 @@ class TestFastAPIServer(unittest.TestCase):
 
         orch = TradingOrchestrator(client=mock_bb, baseline_budget_jpy=98874.1, mode=mode)
         orch.loss_learner = LossLearningEngine(state_path="")
-        controller = BotController(orch, history_path="", config_path="", env_path="", auto_start=False)
+        controller = BotController(
+            orch,
+            history_path="",
+            config_path="",
+            env_path="",
+            tax_profile_path="",
+            trade_log_path="",
+            auto_start=False,
+        )
         app = create_app(controller)
         return TestClient(app), controller, mock_bb
 
@@ -326,6 +334,139 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertTrue(controller.orchestrator.allow_counter_trend_longs)
         self.assertTrue(controller.orchestrator.directional_strategist.allow_counter_trend_longs)
         self.assertTrue(client.get("/api/status").json()["allow_counter_trend_longs"])
+
+    def test_japan_tax_report_profile_and_csv(self):
+        client, _, mock_bb = self._make_client()
+        from datetime import datetime, timezone, timedelta
+
+        jst = timezone(timedelta(hours=9))
+        ts_buy = int(datetime(2026, 4, 10, 10, 0, tzinfo=jst).timestamp() * 1000)
+        ts_sell = int(datetime(2026, 4, 12, 14, 0, tzinfo=jst).timestamp() * 1000)
+        ts_short_close = int(datetime(2026, 5, 1, 18, 0, tzinfo=jst).timestamp() * 1000)
+
+        mock_bb.key = "test_key"
+        mock_bb._get.return_value = {
+            "trades": [
+                # Spot buy 2.0 BTC @ 100,000 JPY = 200,000 cost; fee +200
+                {
+                    "trade_id": 1,
+                    "order_id": 11,
+                    "pair": "btc_jpy",
+                    "side": "buy",
+                    "type": "market",
+                    "amount": "2.0",
+                    "price": "100000",
+                    "maker_taker": "taker",
+                    "position_side": None,
+                    "fee_occurred_amount_quote": "200",
+                    "profit_loss": "0",
+                    "interest": "0",
+                    "executed_at": ts_buy,
+                },
+                # Spot sell 1.0 BTC @ 150,000 JPY -> gross +50,000, fee -30 (maker rebate)
+                {
+                    "trade_id": 2,
+                    "order_id": 12,
+                    "pair": "btc_jpy",
+                    "side": "sell",
+                    "type": "limit",
+                    "amount": "1.0",
+                    "price": "150000",
+                    "maker_taker": "maker",
+                    "position_side": None,
+                    "fee_occurred_amount_quote": "-30",
+                    "profit_loss": "0",
+                    "interest": "0",
+                    "executed_at": ts_sell,
+                },
+                # Margin short close: Bitbank exact profit_loss = 120000, fee = -50 rebate, interest = 100
+                {
+                    "trade_id": 3,
+                    "order_id": 13,
+                    "pair": "xrp_jpy",
+                    "side": "buy",
+                    "type": "limit",
+                    "amount": "500",
+                    "price": "140",
+                    "maker_taker": "maker",
+                    "position_side": "short",
+                    "fee_occurred_amount_quote": "-50",
+                    "profit_loss": "120000",
+                    "interest": "100",
+                    "executed_at": ts_short_close,
+                },
+            ]
+        }
+
+        # 1) Initial GET /api/tax for 2026
+        r_tax = client.get("/api/tax?year=2026")
+        self.assertEqual(r_tax.status_code, 200)
+        rep = r_tax.json()
+        self.assertEqual(rep["data_source"], "bitbank_trade_history")
+        self.assertEqual(rep["gross_realized_pnl_jpy"], 170000.0)
+        self.assertEqual(rep["total_fees_jpy"], 120.0)
+        self.assertEqual(rep["total_interest_jpy"], 100.0)
+        # Net profit = 170000 - 120 - 100 = 169780 (under 200k by itself)
+        self.assertEqual(rep["net_realized_profit_jpy"], 169780.0)
+        self.assertFalse(rep["tax_estimate"]["national_filing_required"])
+
+        # 2) POST /api/tax/profile adding 5M salary + 50k other misc income -> pushes over 200k!
+        r_prof = client.post(
+            "/api/tax/profile",
+            json={
+                "tax_year": 2026,
+                "employment_type": "salary",
+                "annual_salary_jpy": 5000000,
+                "other_misc_income_jpy": 50000,
+                "taxpayer_name": "Taro Yamada",
+                "tax_office": "Shibuya",
+            },
+        )
+        self.assertEqual(r_prof.status_code, 200)
+        rep2 = r_prof.json()
+        self.assertTrue(rep2["tax_estimate"]["national_filing_required"])
+        self.assertGreater(rep2["tax_estimate"]["estimated_tax_jpy"], 20000.0)
+        self.assertEqual(rep2["tax_estimate"]["remaining_to_threshold_jpy"], 0.0)
+
+        # 3) GET /api/tax/csv returns Excel-ready CSV with Japanese header & summary
+        r_csv = client.get("/api/tax/csv?year=2026")
+        self.assertEqual(r_csv.status_code, 200)
+        self.assertIn("text/csv", r_csv.headers.get("content-type", ""))
+        self.assertIn("雑所得", r_csv.text)
+        self.assertIn("btc_jpy", r_csv.text)
+        self.assertIn("xrp_jpy", r_csv.text)
+
+    def test_manual_trade_sync_while_paused_or_off(self):
+        client, controller, mock_bb = self._make_client()
+        import time
+
+        now_ms = int(time.time() * 1000)
+        mock_bb.key = "test_key"
+        mock_bb._get.return_value = {
+            "trades": [
+                {
+                    "trade_id": 99901,
+                    "pair": "eth_jpy",
+                    "side": "buy",
+                    "amount": "0.5",
+                    "price": "300000",
+                    "position_side": "short",
+                    "fee_occurred_amount_quote": "-30",
+                    "profit_loss": "4500",
+                    "interest": "20",
+                    "executed_at": now_ms,
+                }
+            ]
+        }
+
+        added = controller.sync_exchange_trades()
+        self.assertEqual(added, 1)
+        st = client.get("/api/status").json()
+        manual_rows = [t for t in st["trade_history"] if t.get("source") == "manual"]
+        self.assertEqual(len(manual_rows), 1)
+        self.assertEqual(manual_rows[0]["pair"], "eth_jpy")
+        # net_pnl = 4500 - (-30 rebate) - 20 = 4510
+        self.assertEqual(manual_rows[0]["pnl_jpy"], 4510.0)
 
 
 if __name__ == "__main__":
