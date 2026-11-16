@@ -217,6 +217,24 @@ class TestFastAPIServer(unittest.TestCase):
         mock_bb.margin_positions.assert_not_called()
         self.assertEqual(rev.open_positions, [])
 
+    def test_candles_endpoint_and_market_chart_ui(self):
+        client, _, mock_bb = self._make_client(mode="live")
+        mock_bb.candles.return_value = [
+            ["10350000", "10400000", "10320000", "10380000", "1.25", "1794790000000"],
+            ["10380000", "10420000", "10360000", "10410000", "0.95", "1794790900000"],
+        ]
+        r_html = client.get("/")
+        self.assertEqual(r_html.status_code, 200)
+        self.assertIn("Live Bitbank Price Chart", r_html.text)
+
+        r_candles = client.get("/api/candles?pair=btc_jpy&tf=15min")
+        self.assertEqual(r_candles.status_code, 200)
+        data = r_candles.json()
+        self.assertEqual(data["pair"], "btc_jpy")
+        self.assertEqual(data["tf"], "15min")
+        self.assertGreaterEqual(len(data["candles"]), 2)
+        self.assertEqual(data["candles"][0]["o"], 10350000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

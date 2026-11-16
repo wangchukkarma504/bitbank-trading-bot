@@ -10,6 +10,7 @@ Provides:
 
 import argparse
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -623,6 +624,39 @@ class BotController:
             "last_emergency_report": em_report,
         }
 
+    def get_candles(self, pair: str = "btc_jpy", tf: str = "15min", limit: int = 80) -> Dict[str, Any]:
+        """Fetch OHLCV candles from Bitbank public API for the live chart."""
+        valid_tfs = {"5min", "15min", "1hour", "4hour"}
+        tf_clean = tf if tf in valid_tfs else "15min"
+        pair_clean = pair if pair in SUPPORTED_PAIRS else "btc_jpy"
+        now_utc = datetime.now(timezone.utc)
+        raw_rows: List[Any] = []
+        try:
+            if tf_clean == "4hour":
+                raw_rows = self.orchestrator.client.candles(pair_clean, tf_clean, now_utc.strftime("%Y")) or []
+            else:
+                yday = (now_utc - timedelta(days=1)).strftime("%Y%m%d")
+                today = now_utc.strftime("%Y%m%d")
+                for day_str in (yday, today):
+                    try:
+                        raw_rows.extend(self.orchestrator.client.candles(pair_clean, tf_clean, day_str) or [])
+                    except Exception:
+                        pass
+            candles = []
+            for row in raw_rows[-max(10, min(limit, 200)):]:
+                if len(row) >= 6:
+                    candles.append({
+                        "o": float(row[0]),
+                        "h": float(row[1]),
+                        "l": float(row[2]),
+                        "c": float(row[3]),
+                        "v": float(row[4]),
+                        "t": int(row[5]),
+                    })
+            return {"pair": pair_clean, "tf": tf_clean, "candles": candles}
+        except Exception as e:
+            return {"pair": pair_clean, "tf": tf_clean, "candles": [], "error": str(e)}
+
 
 # DASHBOARD_HTML imported from tradingbot.dashboard_html
 
@@ -757,6 +791,10 @@ def create_app(controller: BotController) -> FastAPI:
     @app.get("/api/status", dependencies=[Depends(require_auth)])
     def api_status():
         return JSONResponse(controller.get_status())
+
+    @app.get("/api/candles", dependencies=[Depends(require_auth)])
+    def api_candles(pair: str = "btc_jpy", tf: str = "15min"):
+        return JSONResponse(controller.get_candles(pair=pair, tf=tf))
 
     @app.post("/api/pause", dependencies=[Depends(require_auth)])
     def api_pause():

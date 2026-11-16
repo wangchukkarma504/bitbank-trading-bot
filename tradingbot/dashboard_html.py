@@ -241,6 +241,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="card" style="margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h2 style="margin:0;">Live Bitbank Price Chart</h2>
+        <select id="chartPairSel" onchange="onChartPairChange(this.value)" style="padding:5px 10px;border-radius:8px;border:1px solid rgba(15,23,42,0.16);background:rgba(255,255,255,0.9);font-weight:700;font-size:12px;">
+          <option value="btc_jpy">BTC / JPY</option>
+          <option value="eth_jpy">ETH / JPY</option>
+          <option value="sol_jpy">SOL / JPY</option>
+          <option value="doge_jpy">DOGE / JPY</option>
+          <option value="xrp_jpy">XRP / JPY</option>
+          <option value="ada_jpy">ADA / JPY</option>
+          <option value="link_jpy">LINK / JPY</option>
+          <option value="avax_jpy">AVAX / JPY</option>
+          <option value="dot_jpy">DOT / JPY</option>
+          <option value="ltc_jpy">LTC / JPY</option>
+        </select>
+        <div id="tfBtns" style="display:flex;gap:4px;">
+          <button class="btn-glass" style="padding:4px 9px;font-size:11px;" onclick="setChartTf('5min', this)">5m</button>
+          <button class="btn-primary" style="padding:4px 9px;font-size:11px;" onclick="setChartTf('15min', this)">15m</button>
+          <button class="btn-glass" style="padding:4px 9px;font-size:11px;" onclick="setChartTf('1hour', this)">1h</button>
+          <button class="btn-glass" style="padding:4px 9px;font-size:11px;" onclick="setChartTf('4hour', this)">4h</button>
+        </div>
+      </div>
+      <div id="marketChartLegend" style="display:flex;gap:10px;flex-wrap:wrap;font-size:12px;font-weight:700;color:var(--muted);"></div>
+    </div>
+    <div id="marketChartWrap" style="width:100%;height:300px;position:relative;">
+      <div style="color:var(--muted);padding-top:120px;text-align:center;">Loading Bitbank candles...</div>
+    </div>
+  </div>
+
   <div class="grid-kpi">
     <div class="card">
       <div class="kpi-label">Total Equity</div>
@@ -363,6 +393,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 const fmtJpy = (n) => '¥' + Number(n || 0).toLocaleString('en-US', {maximumFractionDigits: 1});
 let currentState = 'RUNNING';
 let latestPositions = [];
+let chartPair = 'btc_jpy';
+let chartPairManual = false;
+let chartTf = '15min';
+let latestCandles = [];
+let latestStatusData = null;
+let lastCandleFetchTs = 0;
 
 function openSettings() { document.getElementById('settingsModal').classList.add('open'); }
 function closeSettings() { document.getElementById('settingsModal').classList.remove('open'); }
@@ -560,6 +596,21 @@ async function refresh() {
     }
 
     renderChart(d.trade_history, d.baseline_jpy, d.open_positions, d.in_trade_pnl_jpy);
+    latestStatusData = d;
+    if (!chartPairManual && d.open_positions && d.open_positions.length > 0) {
+      const openPair = d.open_positions[0].pair;
+      if (openPair && openPair !== chartPair) {
+        chartPair = openPair;
+        const sel = document.getElementById('chartPairSel');
+        if (sel) sel.value = chartPair;
+        lastCandleFetchTs = 0;
+      }
+    }
+    if (Date.now() - lastCandleFetchTs > 12000 || latestCandles.length === 0) {
+      loadCandles();
+    } else {
+      renderMarketChart();
+    }
 
     const ms = d.milestones;
     document.getElementById('milestonesBox').innerHTML = ['x2', 'x5', 'x10'].map((k, idx) => {
@@ -718,6 +769,181 @@ async function saveConfig() {
   delete document.getElementById('cfgGoalJpy').dataset.dirty;
   document.getElementById('cfgMsg').textContent = 'Saved: ' + (res.updated && res.updated.length ? res.updated.join(', ') : 'no changes');
   refresh();
+}
+
+function onChartPairChange(pair) {
+  chartPair = pair;
+  chartPairManual = true;
+  lastCandleFetchTs = 0;
+  loadCandles();
+}
+
+function setChartTf(tf, btn) {
+  chartTf = tf;
+  document.querySelectorAll('#tfBtns button').forEach(b => b.className = 'btn-glass');
+  if (btn) btn.className = 'btn-primary';
+  lastCandleFetchTs = 0;
+  loadCandles();
+}
+
+async function loadCandles() {
+  try {
+    lastCandleFetchTs = Date.now();
+    const r = await fetch(`/api/candles?pair=${encodeURIComponent(chartPair)}&tf=${encodeURIComponent(chartTf)}`);
+    const res = await r.json();
+    if (res && Array.isArray(res.candles)) {
+      latestCandles = res.candles;
+      renderMarketChart();
+    }
+  } catch (e) {
+    console.error('Candle fetch failed:', e);
+  }
+}
+
+function fmtPx(px) {
+  const n = Number(px || 0);
+  if (n >= 1000) return '¥' + Math.round(n).toLocaleString('en-US');
+  if (n >= 10) return '¥' + n.toFixed(2);
+  return '¥' + n.toFixed(4);
+}
+
+function renderMarketChart() {
+  const wrap = document.getElementById('marketChartWrap');
+  const legend = document.getElementById('marketChartLegend');
+  if (!wrap) return;
+  if (!latestCandles || latestCandles.length === 0) {
+    wrap.innerHTML = '<div style="color:var(--muted);padding-top:120px;text-align:center;">Waiting for Bitbank candle data...</div>';
+    return;
+  }
+
+  const d = latestStatusData || {};
+  const openPos = (d.open_positions || []).find(p => p.pair === chartPair) || null;
+  const sig = (d.signals || []).find(s => s.pair === chartPair) || null;
+
+  const entryPx = openPos ? Number(openPos.avg_price || openPos.average_price || 0) : 0;
+  const stopPx = openPos ? Number(openPos.stop_trigger_price || 0) : 0;
+  const tpPx = (openPos && sig && Number(sig.take_profit_price || 0) > 0) ? Number(sig.take_profit_price) : 0;
+  const lastPx = openPos ? Number(openPos.last_price || 0) : Number(latestCandles[latestCandles.length - 1].c || 0);
+
+  let legHtml = `<span style="color:#0f172a;">Last: <b>${fmtPx(lastPx)}</b></span>`;
+  if (entryPx > 0) {
+    const sideLbl = (openPos.position_side || 'short').toUpperCase();
+    legHtml += `<span style="color:#4f46e5;">● Entry (${sideLbl}): <b>${fmtPx(entryPx)}</b></span>`;
+  }
+  if (stopPx > 0) {
+    const estStop = openPos.est_stop_pnl_jpy !== undefined ? ` (${openPos.est_stop_pnl_jpy >= 0 ? '+' : ''}${fmtJpy(openPos.est_stop_pnl_jpy)})` : '';
+    legHtml += `<span style="color:#dc2626;">▬ Stop Loss: <b>${fmtPx(stopPx)}${estStop}</b></span>`;
+  }
+  if (tpPx > 0) {
+    legHtml += `<span style="color:#16a34a;">┈ TP Target: <b>${fmtPx(tpPx)}</b></span>`;
+  }
+  if (legend) legend.innerHTML = legHtml;
+
+  const W = 1040, H = 300, padL = 16, padR = 112, padT = 18, padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const volH = plotH * 0.16;
+  const priceH = plotH - volH - 8;
+
+  const lows = latestCandles.map(c => c.l);
+  const highs = latestCandles.map(c => c.h);
+  if (entryPx > 0) { lows.push(entryPx); highs.push(entryPx); }
+  if (stopPx > 0) { lows.push(stopPx); highs.push(stopPx); }
+  if (tpPx > 0) { lows.push(tpPx); highs.push(tpPx); }
+  if (lastPx > 0) { lows.push(lastPx); highs.push(lastPx); }
+
+  let minP = Math.min(...lows), maxP = Math.max(...highs);
+  const span = Math.max(1e-9, maxP - minP);
+  minP -= span * 0.07;
+  maxP += span * 0.07;
+  const pSpan = maxP - minP;
+
+  const maxVol = Math.max(1e-9, ...latestCandles.map(c => c.v));
+  const yOf = (p) => padT + (1 - (p - minP) / pSpan) * priceH;
+  const n = latestCandles.length;
+  const step = plotW / n;
+  const cw = Math.max(3, Math.min(11, step * 0.68));
+
+  let gridHtml = '';
+  for (let i = 0; i <= 4; i++) {
+    const pv = minP + (pSpan * i / 4);
+    const gy = yOf(pv);
+    gridHtml += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`;
+    gridHtml += `<text x="${W - padR + 6}" y="${(gy + 4).toFixed(1)}" fill="#64748b" font-size="10.5" font-weight="600">${fmtPx(pv)}</text>`;
+  }
+
+  let candlesHtml = '';
+  latestCandles.forEach((c, idx) => {
+    const cx = padL + idx * step + step / 2;
+    const isUp = c.c >= c.o;
+    const col = isUp ? '#16a34a' : '#dc2626';
+    const yH = yOf(c.h), yL = yOf(c.l), yO = yOf(c.o), yC = yOf(c.c);
+    const bodyTop = Math.min(yO, yC);
+    const bodyH = Math.max(1.5, Math.abs(yC - yO));
+    const vh = (c.v / maxVol) * volH;
+    const vy = (padT + plotH) - vh;
+    candlesHtml += `<rect x="${(cx - cw / 2).toFixed(1)}" y="${vy.toFixed(1)}" width="${cw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${col}" opacity="0.22"/>`;
+    candlesHtml += `<line x1="${cx.toFixed(1)}" y1="${yH.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${col}" stroke-width="1.3"/>`;
+    candlesHtml += `<rect x="${(cx - cw / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${cw.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}" rx="1"/>`;
+  });
+
+  function levelLine(px, color, label, dash) {
+    if (!px || px <= 0) return '';
+    const y = yOf(px);
+    const da = dash ? `stroke-dasharray="${dash}"` : '';
+    return `
+      <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="${color}" stroke-width="1.6" ${da}/>
+      <rect x="${W - padR + 2}" y="${(y - 9).toFixed(1)}" width="106" height="18" rx="4" fill="${color}"/>
+      <text x="${W - padR + 7}" y="${(y + 3.5).toFixed(1)}" fill="#ffffff" font-size="10" font-weight="800">${label} ${fmtPx(px)}</text>
+    `;
+  }
+
+  let overlays = '';
+  overlays += levelLine(lastPx, '#334155', 'LAST', '2 3');
+  if (tpPx > 0) overlays += levelLine(tpPx, '#16a34a', 'TP', '4 3');
+  if (entryPx > 0) overlays += levelLine(entryPx, '#4f46e5', 'ENTRY', '');
+  if (stopPx > 0) overlays += levelLine(stopPx, '#dc2626', 'STOP', '6 3');
+
+  const firstTs = new Date(latestCandles[0].t);
+  const midTs = new Date(latestCandles[Math.floor(n / 2)].t);
+  const lastTs = new Date(latestCandles[n - 1].t);
+  const fmtT = (dt) => dt.toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit'});
+
+  wrap.innerHTML = `
+    <div id="marketTooltip" style="display:none;position:absolute;top:6px;left:18px;background:rgba(15,23,42,0.88);color:#fff;padding:5px 10px;border-radius:8px;font-size:11px;font-weight:600;pointer-events:none;z-index:5;"></div>
+    <svg id="marketSvg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="none" style="cursor:crosshair;">
+      ${gridHtml}
+      ${candlesHtml}
+      ${overlays}
+      <line id="crossV" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(15,23,42,0.35)" stroke-width="1" stroke-dasharray="3 3" style="display:none;"/>
+      <text x="${padL}" y="${H - 6}" fill="#64748b" font-size="10.5" font-weight="600">${fmtT(firstTs)}</text>
+      <text x="${(padL + plotW / 2 - 16).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="10.5" font-weight="600">${fmtT(midTs)}</text>
+      <text x="${(W - padR - 34).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="10.5" font-weight="600">${fmtT(lastTs)}</text>
+    </svg>`;
+
+  const svg = document.getElementById('marketSvg');
+  const tip = document.getElementById('marketTooltip');
+  const crossV = document.getElementById('crossV');
+  if (svg && tip && crossV) {
+    svg.addEventListener('mousemove', (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const relX = ((ev.clientX - rect.left) / rect.width) * W;
+      const idx = Math.max(0, Math.min(n - 1, Math.floor((relX - padL) / step)));
+      const c = latestCandles[idx];
+      if (!c) return;
+      const cx = padL + idx * step + step / 2;
+      crossV.setAttribute('x1', cx.toFixed(1));
+      crossV.setAttribute('x2', cx.toFixed(1));
+      crossV.style.display = 'block';
+      const dt = new Date(c.t).toLocaleString('ja-JP', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
+      tip.style.display = 'block';
+      tip.textContent = `${dt} | O: ${fmtPx(c.o)}  H: ${fmtPx(c.h)}  L: ${fmtPx(c.l)}  C: ${fmtPx(c.c)}  Vol: ${c.v.toFixed(3)}`;
+    });
+    svg.addEventListener('mouseleave', () => {
+      crossV.style.display = 'none';
+      tip.style.display = 'none';
+    });
+  }
 }
 
 refresh();
