@@ -839,14 +839,21 @@ function renderMarketChart() {
   }
   if (legend) legend.innerHTML = legHtml;
 
-  const W = 1040, H = 300, padL = 16, padR = 112, padT = 18, padB = 26;
+  const W = Math.max(300, Math.floor(wrap.clientWidth || 1040));
+  const isMobile = W < 640;
+  const H = isMobile ? 250 : 300;
+  wrap.style.height = H + 'px';
+  const candles = isMobile ? latestCandles.slice(-36) : latestCandles;
+  const padL = isMobile ? 4 : 16;
+  const padR = isMobile ? 96 : 114;
+  const padT = 18, padB = 24;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
   const volH = plotH * 0.16;
   const priceH = plotH - volH - 8;
 
-  const lows = latestCandles.map(c => c.l);
-  const highs = latestCandles.map(c => c.h);
+  const lows = candles.map(c => c.l);
+  const highs = candles.map(c => c.h);
   if (entryPx > 0) { lows.push(entryPx); highs.push(entryPx); }
   if (stopPx > 0) { lows.push(stopPx); highs.push(stopPx); }
   if (tpPx > 0) { lows.push(tpPx); highs.push(tpPx); }
@@ -858,22 +865,25 @@ function renderMarketChart() {
   maxP += span * 0.07;
   const pSpan = maxP - minP;
 
-  const maxVol = Math.max(1e-9, ...latestCandles.map(c => c.v));
+  const maxVol = Math.max(1e-9, ...candles.map(c => c.v));
   const yOf = (p) => padT + (1 - (p - minP) / pSpan) * priceH;
-  const n = latestCandles.length;
+  const n = candles.length;
   const step = plotW / n;
   const cw = Math.max(3, Math.min(11, step * 0.68));
+  const axisFont = isMobile ? 9.5 : 10.5;
+  const tagFont = isMobile ? 9 : 10;
+  const tagW = padR - 4;
 
   let gridHtml = '';
   for (let i = 0; i <= 4; i++) {
     const pv = minP + (pSpan * i / 4);
     const gy = yOf(pv);
     gridHtml += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`;
-    gridHtml += `<text x="${W - padR + 6}" y="${(gy + 4).toFixed(1)}" fill="#64748b" font-size="10.5" font-weight="600">${fmtPx(pv)}</text>`;
+    gridHtml += `<text x="${W - padR + 5}" y="${(gy + 3.5).toFixed(1)}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtPx(pv)}</text>`;
   }
 
   let candlesHtml = '';
-  latestCandles.forEach((c, idx) => {
+  candles.forEach((c, idx) => {
     const cx = padL + idx * step + step / 2;
     const isUp = c.c >= c.o;
     const col = isUp ? '#16a34a' : '#dc2626';
@@ -893,8 +903,8 @@ function renderMarketChart() {
     const da = dash ? `stroke-dasharray="${dash}"` : '';
     return `
       <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="${color}" stroke-width="1.6" ${da}/>
-      <rect x="${W - padR + 2}" y="${(y - 9).toFixed(1)}" width="106" height="18" rx="4" fill="${color}"/>
-      <text x="${W - padR + 7}" y="${(y + 3.5).toFixed(1)}" fill="#ffffff" font-size="10" font-weight="800">${label} ${fmtPx(px)}</text>
+      <rect x="${W - padR + 2}" y="${(y - 9).toFixed(1)}" width="${tagW}" height="18" rx="4" fill="${color}"/>
+      <text x="${W - padR + 6}" y="${(y + 3.5).toFixed(1)}" fill="#ffffff" font-size="${tagFont}" font-weight="800">${label} ${fmtPx(px)}</text>
     `;
   }
 
@@ -904,32 +914,32 @@ function renderMarketChart() {
   if (entryPx > 0) overlays += levelLine(entryPx, '#4f46e5', 'ENTRY', '');
   if (stopPx > 0) overlays += levelLine(stopPx, '#dc2626', 'STOP', '6 3');
 
-  const firstTs = new Date(latestCandles[0].t);
-  const midTs = new Date(latestCandles[Math.floor(n / 2)].t);
-  const lastTs = new Date(latestCandles[n - 1].t);
+  const firstTs = new Date(candles[0].t);
+  const midTs = new Date(candles[Math.floor(n / 2)].t);
+  const lastTs = new Date(candles[n - 1].t);
   const fmtT = (dt) => dt.toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit'});
 
   wrap.innerHTML = `
-    <div id="marketTooltip" style="display:none;position:absolute;top:6px;left:18px;background:rgba(15,23,42,0.88);color:#fff;padding:5px 10px;border-radius:8px;font-size:11px;font-weight:600;pointer-events:none;z-index:5;"></div>
-    <svg id="marketSvg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="none" style="cursor:crosshair;">
+    <div id="marketTooltip" style="display:none;position:absolute;top:6px;left:8px;right:${padR + 4}px;background:rgba(15,23,42,0.9);color:#fff;padding:5px 9px;border-radius:8px;font-size:11px;font-weight:600;pointer-events:none;z-index:5;"></div>
+    <svg id="marketSvg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" style="cursor:crosshair;">
       ${gridHtml}
       ${candlesHtml}
       ${overlays}
       <line id="crossV" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(15,23,42,0.35)" stroke-width="1" stroke-dasharray="3 3" style="display:none;"/>
-      <text x="${padL}" y="${H - 6}" fill="#64748b" font-size="10.5" font-weight="600">${fmtT(firstTs)}</text>
-      <text x="${(padL + plotW / 2 - 16).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="10.5" font-weight="600">${fmtT(midTs)}</text>
-      <text x="${(W - padR - 34).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="10.5" font-weight="600">${fmtT(lastTs)}</text>
+      <text x="${padL}" y="${H - 6}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtT(firstTs)}</text>
+      <text x="${(padL + plotW / 2 - 16).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtT(midTs)}</text>
+      <text x="${(W - padR - 34).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtT(lastTs)}</text>
     </svg>`;
 
   const svg = document.getElementById('marketSvg');
   const tip = document.getElementById('marketTooltip');
   const crossV = document.getElementById('crossV');
   if (svg && tip && crossV) {
-    svg.addEventListener('mousemove', (ev) => {
+    const showAt = (clientX) => {
       const rect = svg.getBoundingClientRect();
-      const relX = ((ev.clientX - rect.left) / rect.width) * W;
+      const relX = ((clientX - rect.left) / rect.width) * W;
       const idx = Math.max(0, Math.min(n - 1, Math.floor((relX - padL) / step)));
-      const c = latestCandles[idx];
+      const c = candles[idx];
       if (!c) return;
       const cx = padL + idx * step + step / 2;
       crossV.setAttribute('x1', cx.toFixed(1));
@@ -937,14 +947,23 @@ function renderMarketChart() {
       crossV.style.display = 'block';
       const dt = new Date(c.t).toLocaleString('ja-JP', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
       tip.style.display = 'block';
-      tip.textContent = `${dt} | O: ${fmtPx(c.o)}  H: ${fmtPx(c.h)}  L: ${fmtPx(c.l)}  C: ${fmtPx(c.c)}  Vol: ${c.v.toFixed(3)}`;
-    });
-    svg.addEventListener('mouseleave', () => {
+      tip.textContent = `${dt} | O:${fmtPx(c.o)} H:${fmtPx(c.h)} L:${fmtPx(c.l)} C:${fmtPx(c.c)}`;
+    };
+    const hideTip = () => {
       crossV.style.display = 'none';
       tip.style.display = 'none';
-    });
+    };
+    svg.addEventListener('mousemove', (ev) => showAt(ev.clientX));
+    svg.addEventListener('mouseleave', hideTip);
+    svg.addEventListener('touchstart', (ev) => { if (ev.touches && ev.touches[0]) showAt(ev.touches[0].clientX); }, {passive: true});
+    svg.addEventListener('touchmove', (ev) => { if (ev.touches && ev.touches[0]) showAt(ev.touches[0].clientX); }, {passive: true});
+    svg.addEventListener('touchend', hideTip);
   }
 }
+
+window.addEventListener('resize', () => {
+  if (latestCandles && latestCandles.length) renderMarketChart();
+});
 
 refresh();
 setInterval(refresh, 5000);
