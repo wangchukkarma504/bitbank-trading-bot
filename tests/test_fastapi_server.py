@@ -446,6 +446,19 @@ class TestFastAPIServer(unittest.TestCase):
         mock_bb.key = "test_key"
         mock_bb._get.return_value = {
             "trades": [
+                # Opening maker short fill: profit_loss=0, rebate=-39.48 -> must NOT appear as phantom +39.48 trade!
+                {
+                    "trade_id": 99900,
+                    "pair": "xrp_jpy",
+                    "side": "sell",
+                    "amount": "1300",
+                    "price": "151.3",
+                    "position_side": "short",
+                    "fee_occurred_amount_quote": "-39.48",
+                    "profit_loss": "0",
+                    "interest": "0",
+                    "executed_at": now_ms - 5000,
+                },
                 {
                     "trade_id": 99901,
                     "pair": "eth_jpy",
@@ -457,14 +470,15 @@ class TestFastAPIServer(unittest.TestCase):
                     "profit_loss": "4500",
                     "interest": "20",
                     "executed_at": now_ms,
-                }
+                },
             ]
         }
 
         added = controller.sync_exchange_trades()
-        self.assertEqual(added, 1)
+        self.assertEqual(added, 2)
         st = client.get("/api/status").json()
         manual_rows = [t for t in st["trade_history"] if t.get("source") == "manual"]
+        # Only the closing ETH short trade should be present, NOT the +39.48 opening maker rebate
         self.assertEqual(len(manual_rows), 1)
         self.assertEqual(manual_rows[0]["pair"], "eth_jpy")
         # net_pnl = 4500 - (-30 rebate) - 20 = 4510

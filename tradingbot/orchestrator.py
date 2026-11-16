@@ -79,6 +79,7 @@ class TradingOrchestrator:
 
     # Anti-churn & capital preservation circuit breakers
     POST_CLOSE_COOLDOWN_SEC: float = 180.0      # 3 min global cooldown after any position closes
+    SAME_PAIR_POST_CLOSE_SEC: float = 900.0     # 15 min cooldown on same pair after any close (stop whipsaw/churn)
     LOSS_PAIR_COOLDOWN_SEC: float = 900.0       # 15 min same-pair cooldown after a losing close
     MAX_ENTRIES_PER_HOUR: int = 5               # Max 5 new entries per rolling 60-min window
     MAX_CONSECUTIVE_LOSSES: int = 2             # 2 consecutive losses trigger circuit breaker
@@ -216,9 +217,13 @@ class TradingOrchestrator:
                     )
             else:
                 self._consecutive_losses = 0
+                self._pair_cooldown_until[pair] = max(
+                    self._pair_cooldown_until.get(pair, 0.0),
+                    now_ts + self.SAME_PAIR_POST_CLOSE_SEC,
+                )
                 self.logger.info(
                     f"Position closed on {pair} (eq {entry_eq:,.0f} -> {equity:,.0f} JPY). "
-                    f"Global post-close cooldown {self.POST_CLOSE_COOLDOWN_SEC:.0f}s active."
+                    f"Global cooldown {self.POST_CLOSE_COOLDOWN_SEC:.0f}s + {pair} cooldown {self.SAME_PAIR_POST_CLOSE_SEC:.0f}s active."
                 )
 
         # Rapid session drawdown guard
@@ -411,15 +416,14 @@ class TradingOrchestrator:
                 and est_net_pnl >= self.force_profit_close_jpy
             )
 
-            # Check extended take-profit blow-off exit condition (+5.0% target for short, +5.0% for long)
-            # Intermediate gains (+0.3%, +1.0%, +2.0%, +3.0%, +4.0%+) are handled dynamically by the 5-tier adaptive trailing stop
+            # Check extended take-profit blow-off exit condition (+2.8% target for short/long, backtest-verified)
             tp_hit = force_tp_hit
             if not tp_hit and side == "short" and avg_px > 0:
-                target_px = avg_px * 0.950  # +5.0% take profit blow-off target (~¥780 net profit)
+                target_px = avg_px * 0.972  # +2.8% take profit blow-off target (~¥5,400 net profit)
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
             elif not tp_hit and side == "long" and avg_px > 0:
-                target_px = avg_px * (1.030 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs) else 1.050)
+                target_px = avg_px * (1.030 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs) else 1.028)
                 if last_px >= target_px and last_px > 0:
                     tp_hit = True
                 elif pair in SPOT_ONLY_PAIRS and last_px > 0 and last_px <= avg_px * 0.985:

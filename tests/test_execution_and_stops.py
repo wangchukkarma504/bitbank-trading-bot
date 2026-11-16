@@ -500,9 +500,9 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
         self.assertEqual(mgr.current_stop_id, oid1)
 
     def test_multi_tier_dynamic_trailing_ratchets(self):
-        """Verify that evaluate_and_apply_ratchets ratchets stops tightly and continuously
-        through Early Profit-Lock (+0.6%), brackets (+1.0%, +2.0%, +3.0%), and dynamic 0.6% trailing
-        so peak gains are protected and never surrendered.
+        """Verify that evaluate_and_apply_ratchets gives trends realistic breathing room
+        through BE (+0.75% -> +0.22%), Early Profit-Lock (+1.2% -> +0.60%),
+        and dynamic 1.0% trailing once gain >= +1.6%.
         """
         from tradingbot.execution.risk_manager import RiskManager
         rm = RiskManager(self.client)
@@ -516,18 +516,37 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
             "avg_price": 10000.0,
         }
 
-        # Case 1: Price drops to 9,930 (-0.7% = Early Profit-Lock). Stop moves to 9,965.0 (+0.35% profit locked)
+        # Case 1: +0.60% (9,940) -> Too early to choke, no ratchet yet
+        res_noise = rm.evaluate_and_apply_ratchets(
+            pair="sol_jpy",
+            position=pos,
+            current_price=9940.0,
+            client=self.client,
+        )
+        self.assertIsNone(res_noise)
+
+        # Case 2: +0.85% (9,915) -> Fee-covered BE ratchet: 10000 * 0.9978 = 9,978.0 (+0.22% locked)
+        res_be = rm.evaluate_and_apply_ratchets(
+            pair="sol_jpy",
+            position=pos,
+            current_price=9915.0,
+            client=self.client,
+        )
+        self.assertIsNotNone(res_be)
+        mgr = rm.get_sync_manager("sol_jpy", self.client)
+        self.assertAlmostEqual(mgr.current_stop_level, 9978.0, places=1)
+
+        # Case 3: +1.30% (9,870) -> Early Profit-Lock: 10000 * 0.994 = 9,940.0 (+0.60% locked)
         res_early = rm.evaluate_and_apply_ratchets(
             pair="sol_jpy",
             position=pos,
-            current_price=9930.0,
+            current_price=9870.0,
             client=self.client,
         )
         self.assertIsNotNone(res_early)
-        mgr = rm.get_sync_manager("sol_jpy", self.client)
-        self.assertAlmostEqual(mgr.current_stop_level, 9965.0, places=1)
+        self.assertAlmostEqual(mgr.current_stop_level, 9940.0, places=1)
 
-        # Case 2: Price drops to 9,780 (-2.2% gain). Dynamic 0.6% trail: 9780 * 1.006 = 9838.7
+        # Case 4: +2.20% (9,780) -> Dynamic 1.0% trail: max(9780 * 1.010, min_safe) vs floor -> 9780 * 1.010 = 9877.8, floored by +1.4% (9860.0)
         res_tier3 = rm.evaluate_and_apply_ratchets(
             pair="sol_jpy",
             position=pos,
@@ -535,19 +554,9 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
             client=self.client,
         )
         self.assertIsNotNone(res_tier3)
-        self.assertAlmostEqual(mgr.current_stop_level, 9838.7, places=1)
+        self.assertAlmostEqual(mgr.current_stop_level, 9860.0, places=1)
 
-        # Case 3: Price drops to 9,680 (-3.2% gain). Dynamic 0.6% trail: 9680 * 1.006 = 9738.1
-        res_tier4 = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=9680.0,
-            client=self.client,
-        )
-        self.assertIsNotNone(res_tier4)
-        self.assertAlmostEqual(mgr.current_stop_level, 9738.1, places=1)
-
-        # Case 4: Price drops to 9,400 (-6.0% gain). Dynamic 0.6% trail: 9400 * 1.006 = 9456.4
+        # Case 5: +6.00% (9,400) -> Dynamic 1.0% trail: 9400 * 1.010 = 9494.0
         res_tier5 = rm.evaluate_and_apply_ratchets(
             pair="sol_jpy",
             position=pos,
@@ -555,7 +564,7 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
             client=self.client,
         )
         self.assertIsNotNone(res_tier5)
-        self.assertAlmostEqual(mgr.current_stop_level, 9456.4, places=1)
+        self.assertAlmostEqual(mgr.current_stop_level, 9494.0, places=1)
 
 
 if __name__ == "__main__":

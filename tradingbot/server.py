@@ -396,7 +396,12 @@ class BotController:
                 fee_q = float(t.get("fee_occurred_amount_quote") or t.get("fee_amount_quote") or 0.0)
                 interest = float(t.get("interest") or 0.0)
                 raw_pnl = float(t.get("profit_loss") or 0.0)
-                net_pnl = round(raw_pnl - fee_q - interest, 2) if pos_side else 0.0
+                is_close = (
+                    (pos_side == "short" and side == "buy")
+                    or (pos_side == "long" and side == "sell")
+                    or abs(raw_pnl) > 0.01
+                )
+                net_pnl = round(raw_pnl - fee_q - interest, 2) if (pos_side and is_close) else 0.0
                 ts_ms = int(t.get("executed_at") or 0)
                 ts_sec = int(ts_ms / 1000) if ts_ms > 0 else int(time.time())
                 is_bot = any(bp == pair and abs(bts - ts_sec) <= 25 for bp, bts in bot_closes)
@@ -406,7 +411,9 @@ class BotController:
                     "time_jst": datetime.fromtimestamp(ts_sec, tz=jst).strftime("%Y-%m-%d %H:%M:%S"),
                     "pair": pair,
                     "side": f"{side} ({pos_side})" if pos_side else f"{side} (spot)",
+                    "raw_side": side,
                     "position_side": pos_side,
+                    "is_close": bool(is_close),
                     "amount": amt,
                     "price_jpy": px,
                     "gross_pnl_jpy": round(raw_pnl, 2),
@@ -772,6 +779,10 @@ class BotController:
 
         for row in audit_copy:
             if row.get("source") != "manual" or not row.get("position_side"):
+                continue
+            # Ignore opening margin fills (which only carry maker rebates with gross_pnl == 0)
+            gross_pnl = float(row.get("gross_pnl_jpy") or 0.0)
+            if not row.get("is_close") and abs(gross_pnl) < 0.01:
                 continue
             pnl = float(row.get("net_pnl_jpy") or 0.0)
             if abs(pnl) < 0.01:

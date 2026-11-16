@@ -354,9 +354,9 @@ class RiskManager:
         current_price: float,
         client=None,
         active_stops: Optional[List[Dict[str, Any]]] = None,
-        be_trigger_pct: float = 0.0045,   # +0.45% unrealized profit triggers fee-covered break-even
-        lock_trigger_pct: float = 0.010,   # +1.0% unrealized profit triggers profit lock
-        lock_profit_pct: float = 0.005,    # Locks in +0.5% profit
+        be_trigger_pct: float = 0.0075,   # +0.75% unrealized profit triggers fee-covered break-even (backtest-verified)
+        lock_trigger_pct: float = 0.012,   # +1.2% unrealized profit triggers early profit lock
+        lock_profit_pct: float = 0.006,    # Locks in +0.6% profit
     ) -> Optional[Dict[str, Any]]:
         """Evaluate unrealized PnL and ratchet the protective stop closer to protect capital.
         Uses place-before-cancel sync_stop to maintain continuous exchange protection.
@@ -426,32 +426,27 @@ class RiskManager:
             min_safe_stop = round(current_price * 1.0015, pd)
             new_stop: Optional[float] = None
 
-            # Tight Continuous Dynamic Trailing once gain >= +1.0%:
-            # Always trail 0.6% behind market price, locking >= 70-80% of peak gains
-            if gain_pct >= 0.010:
-                trail_stop = round(current_price * 1.006, pd)
+            # Dynamic Trailing once gain >= +1.6%: give trends 1.0% breathing room instead of 0.6% choking
+            if gain_pct >= 0.016:
+                trail_stop = round(current_price * 1.010, pd)
                 if gain_pct >= 0.035:
-                    min_lock = round(avg_px * (1.0 - 0.030), pd)  # Lock +3.0%
-                elif gain_pct >= 0.030:
                     min_lock = round(avg_px * (1.0 - 0.025), pd)  # Lock +2.5%
-                elif gain_pct >= 0.025:
-                    min_lock = round(avg_px * (1.0 - 0.020), pd)  # Lock +2.0%
-                elif gain_pct >= 0.020:
-                    min_lock = round(avg_px * (1.0 - 0.016), pd)  # Lock +1.6%
-                elif gain_pct >= 0.015:
-                    min_lock = round(avg_px * (1.0 - 0.011), pd)  # Lock +1.1%
+                elif gain_pct >= 0.028:
+                    min_lock = round(avg_px * (1.0 - 0.019), pd)  # Lock +1.9%
+                elif gain_pct >= 0.022:
+                    min_lock = round(avg_px * (1.0 - 0.014), pd)  # Lock +1.4%
                 else:
-                    min_lock = round(avg_px * (1.0 - 0.007), pd)  # Lock +0.7%
+                    min_lock = round(avg_px * (1.0 - 0.010), pd)  # Lock +1.0%
 
                 new_stop = max(min_safe_stop, min(trail_stop, min_lock))
 
-            # Early Profit-Lock Ratchet (+0.6% gain -> lock +0.35% profit)
-            elif gain_pct >= 0.006:
-                new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0035), pd))
+            # Early Profit-Lock Ratchet (+1.2% gain -> lock +0.60% profit)
+            elif gain_pct >= lock_trigger_pct:
+                new_stop = max(min_safe_stop, round(avg_px * (1.0 - lock_profit_pct), pd))
 
-            # Fee-Covered Break-Even Ratchet (+0.45% gain -> lock +0.18% to cover 0.12% taker stop fee)
+            # Fee-Covered Break-Even Ratchet (+0.75% gain -> lock +0.22% to cover 0.12% taker stop fee)
             elif gain_pct >= be_trigger_pct:
-                new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0018), pd))
+                new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0022), pd))
 
             if new_stop is not None and (current_stop is None or new_stop < current_stop - 1e-6):
                 return mgr.sync_stop(amt_str, new_stop, position_side=side)
@@ -461,32 +456,27 @@ class RiskManager:
             max_safe_stop = round(current_price * 0.9985, pd)
             new_stop = None
 
-            # Tight Continuous Dynamic Trailing once gain >= +1.0%:
-            # Always trail 0.6% behind market price, locking >= 70-80% of peak gains
-            if gain_pct >= 0.010:
-                trail_stop = round(current_price * 0.994, pd)
+            # Dynamic Trailing once gain >= +1.6%: give trends 1.0% breathing room instead of 0.6% choking
+            if gain_pct >= 0.016:
+                trail_stop = round(current_price * 0.990, pd)
                 if gain_pct >= 0.035:
-                    min_lock = round(avg_px * (1.0 + 0.030), pd)
-                elif gain_pct >= 0.030:
                     min_lock = round(avg_px * (1.0 + 0.025), pd)
-                elif gain_pct >= 0.025:
-                    min_lock = round(avg_px * (1.0 + 0.020), pd)
-                elif gain_pct >= 0.020:
-                    min_lock = round(avg_px * (1.0 + 0.016), pd)
-                elif gain_pct >= 0.015:
-                    min_lock = round(avg_px * (1.0 + 0.011), pd)
+                elif gain_pct >= 0.028:
+                    min_lock = round(avg_px * (1.0 + 0.019), pd)
+                elif gain_pct >= 0.022:
+                    min_lock = round(avg_px * (1.0 + 0.014), pd)
                 else:
-                    min_lock = round(avg_px * (1.0 + 0.007), pd)
+                    min_lock = round(avg_px * (1.0 + 0.010), pd)
 
                 new_stop = min(max_safe_stop, max(trail_stop, min_lock))
 
-            # Early Profit-Lock Ratchet (+0.6% gain -> lock +0.35% profit)
-            elif gain_pct >= 0.006:
-                new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0035), pd))
+            # Early Profit-Lock Ratchet (+1.2% gain -> lock +0.60% profit)
+            elif gain_pct >= lock_trigger_pct:
+                new_stop = min(max_safe_stop, round(avg_px * (1.0 + lock_profit_pct), pd))
 
-            # Fee-Covered Break-Even Ratchet (+0.45% gain -> lock +0.18% to cover 0.12% taker stop fee)
+            # Fee-Covered Break-Even Ratchet (+0.75% gain -> lock +0.22% to cover 0.12% taker stop fee)
             elif gain_pct >= be_trigger_pct:
-                new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0018), pd))
+                new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0022), pd))
 
             if new_stop is not None and (current_stop is None or new_stop > current_stop + 1e-6):
                 return mgr.sync_stop(amt_str, new_stop, position_side=stop_pos_side)
