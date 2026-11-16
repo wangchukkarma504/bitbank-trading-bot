@@ -151,7 +151,8 @@ class TradingOrchestrator:
         for pos in review_res.open_positions:
             pair = pos.get("pair")
             if pair and pair not in self._active_tracked_positions:
-                self._active_tracked_positions[pair] = equity
+                upnl = float(pos.get("unrealized_pnl_jpy", 0.0) or 0.0)
+                self._active_tracked_positions[pair] = equity - upnl
                 sig = self.last_signals.get(pair)
                 macro_bias = getattr(self.last_macro_report, "catalyst_bias", "NEUTRAL") if self.last_macro_report else "NEUTRAL"
                 self._active_position_meta[pair] = {
