@@ -1407,11 +1407,15 @@ async function loadTaxReport(yearVal) {
   try {
     const yr = yearVal || (document.getElementById('taxYearSel') ? document.getElementById('taxYearSel').value : '');
     const qs = yr ? ('?year=' + encodeURIComponent(yr)) : '';
-    const rep = await api('/api/tax' + qs);
+    const r = await fetch('/api/tax' + qs);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rep = await r.json();
     renderTaxReport(rep);
   } catch (e) {
     const el = document.getElementById('taxDataSourceNote');
-    if (el) el.textContent = 'Could not load tax report yet.';
+    if (el) el.textContent = 'Could not load tax report: ' + (e.message || e);
+    const badge = document.getElementById('taxFilingBadge');
+    if (badge && badge.textContent === 'CHECKING...') badge.textContent = 'RETRY NEEDED';
   }
 }
 
@@ -1426,11 +1430,13 @@ async function saveTaxProfile() {
       taxpayer_name: document.getElementById('taxName').value || '',
       tax_office: document.getElementById('taxOffice').value || '',
     };
-    const rep = await api('/api/tax/profile', {
+    const r = await fetch('/api/tax/profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rep = await r.json();
     renderTaxReport(rep);
     if (msg) {
       msg.style.color = 'var(--green)';
