@@ -354,7 +354,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div class="grid-2">
     <div class="card">
-      <h2>Per-Trade Profit &amp; Loss (JPY)</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
+        <h2 style="margin:0;">Per-Trade Profit &amp; Loss (JPY)</h2>
+        <div id="tradeChartLegend" style="font-size:11.5px;font-weight:700;color:var(--muted);"></div>
+      </div>
       <div class="chart-wrap" id="chartWrap"></div>
     </div>
     <div class="card">
@@ -659,25 +662,68 @@ function _smoothPath(coords) {
 
 function renderChart(trades, baseline, openPositions, inTradePnl) {
   const wrap = document.getElementById('chartWrap');
-  const pts = [{ label: '0', pnl: 0, isStart: true, isLive: false }];
+  const legend = document.getElementById('tradeChartLegend');
+  if (!wrap) return;
+
+  const pts = [{ label: 'Start', shortLbl: '0', pnl: 0, pair: '', isStart: true, isLive: false }];
   (trades || []).forEach((t, idx) => {
-    pts.push({ label: String(idx + 1), pnl: Number(t.pnl_jpy || 0), isStart: false, isLive: false });
+    const pName = (t.pair || '').toUpperCase().replace('_JPY', '');
+    pts.push({
+      label: `#${idx + 1}${pName ? ' ' + pName : ''}${t.source === 'manual' ? ' (Manual)' : ''}`,
+      shortLbl: `#${idx + 1}`,
+      pnl: Number(t.pnl_jpy || 0),
+      pair: pName,
+      isStart: false,
+      isLive: false,
+    });
   });
   if (openPositions && openPositions.length > 0) {
-    pts.push({ label: `${pts.length} (LIVE)`, pnl: Number(inTradePnl || 0), isStart: false, isLive: true });
+    const oName = (openPositions[0].pair || '').toUpperCase().replace('_JPY', '');
+    pts.push({
+      label: `LIVE${oName ? ' ' + oName : ''}`,
+      shortLbl: 'LIVE',
+      pnl: Number(inTradePnl || 0),
+      pair: oName,
+      isStart: false,
+      isLive: true,
+    });
   }
+
+  const lastPt = pts[pts.length - 1];
+  const setLegend = (pt) => {
+    if (!legend) return;
+    if (pts.length === 1) {
+      legend.textContent = `Baseline ${fmtJpy(baseline)}`;
+      return;
+    }
+    const col = pt.isStart ? '#475569' : (pt.pnl >= 0 ? '#16a34a' : '#dc2626');
+    const sign = pt.pnl >= 0 ? '+' : '';
+    legend.innerHTML = `<span style="color:#64748b;">Base ${fmtJpy(baseline)}</span> · <span style="color:${col};">${pt.label}: ${sign}${fmtJpy(pt.pnl)}</span>`;
+  };
+  setLegend(lastPt);
+
   if (pts.length === 1) {
     wrap.innerHTML = `<div style="color:var(--muted);padding-top:85px;text-align:center;">Initial Capital: ${fmtJpy(baseline)} (¥0) — waiting for first trade...</div>`;
     return;
   }
-  const w = wrap.clientWidth || 720, h = 215, padX = 38, padTop = 30, padBot = 42;
+
+  const w = Math.max(260, Math.floor(wrap.clientWidth || 720));
+  const isMobile = w < 640;
+  const h = isMobile ? 190 : 220;
+  wrap.style.height = h + 'px';
+  const padL = isMobile ? 8 : 14;
+  const padR = isMobile ? 56 : 70;
+  const padTop = 16;
+  const padBot = 24;
+
   const vals = pts.map(p => p.pnl);
   let maxV = Math.max(...vals, 100), minV = Math.min(...vals, -100);
   if (maxV < 0) maxV = 0;
   if (minV > 0) minV = 0;
   const span = Math.max(100, maxV - minV);
+  const plotW = w - padL - padR;
   const plotH = h - padTop - padBot;
-  const x = (i) => padX + (i / (pts.length - 1)) * (w - padX * 2);
+  const x = (i) => padL + (i / (pts.length - 1)) * plotW;
   const y = (v) => padTop + ((maxV - v) / span) * plotH;
   const zeroY = y(0);
 
@@ -687,31 +733,83 @@ function renderChart(trades, baseline, openPositions, inTradePnl) {
   const strokeColor = last.pnl >= 0 ? '#16a34a' : '#dc2626';
   const areaD = `${pathD} L ${last.x.toFixed(1)},${zeroY.toFixed(1)} L ${coords[0].x.toFixed(1)},${zeroY.toFixed(1)} Z`;
 
+  const fmtShort = (v) => {
+    const abs = Math.abs(v);
+    const s = v > 0 ? '+' : (v < 0 ? '-' : '');
+    if (abs >= 1000) return `${s}¥${(abs / 1000).toFixed(1)}k`;
+    return `${s}¥${Math.round(abs)}`;
+  };
+  const gridTicks = [maxV, 0, minV].filter((v, i, arr) => i === 0 || Math.abs(v - arr[i - 1]) > span * 0.12);
+  const gridHtml = gridTicks.map(v => {
+    const gy = y(v);
+    const isZero = Math.abs(v) < 1e-6;
+    return `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${(w - padR).toFixed(1)}" y2="${gy.toFixed(1)}" stroke="${isZero ? '#64748b' : 'rgba(15,23,42,0.08)'}" stroke-dasharray="${isZero ? '4 4' : '2 3'}" stroke-width="1"/>
+      <text x="${(w - padR + 6).toFixed(1)}" y="${(gy + 3.5).toFixed(1)}" fill="${isZero ? '#334155' : '#64748b'}" font-size="${isMobile ? 9.5 : 10.5}" font-weight="${isZero ? 800 : 600}">${isZero ? '¥0' : fmtShort(v)}</text>`;
+  }).join('');
+
+  // Stride X-axis labels cleanly so they never overlap on mobile
+  const maxXLabels = isMobile ? 5 : 9;
+  const xStep = Math.max(1, Math.ceil((pts.length - 1) / (maxXLabels - 1)));
   const dots = coords.map((p, idx) => {
+    const isEnd = idx === coords.length - 1;
     const col = p.isStart ? '#64748b' : (p.isLive ? '#2563eb' : (p.pnl >= 0 ? '#16a34a' : '#dc2626'));
-    const valTxt = p.isStart ? '¥0' : ((p.pnl >= 0 ? '+' : '') + fmtJpy(p.pnl));
-    const valY = p.pnl >= 0 ? Math.max(14, p.y - 10) : Math.min(h - 24, p.y + 16);
-    const anchor = idx === coords.length - 1 ? 'end' : (idx === 0 ? 'start' : 'middle');
+    const showX = isEnd || idx === 0 || (idx % xStep === 0 && (coords.length - 1 - idx) >= Math.max(1, Math.floor(xStep * 0.6)));
+    const anchor = isEnd ? 'end' : (idx === 0 ? 'start' : 'middle');
+    const rDot = p.isStart ? 3 : (isEnd ? 5 : (isMobile ? 3.2 : 4));
+    // Only show inline value pill for final point to eliminate overlapping text
+    let endLabel = '';
+    if (isEnd && !p.isStart) {
+      const sign = p.pnl >= 0 ? '+' : '';
+      const valTxt = `${sign}${fmtJpy(p.pnl)}`;
+      const valY = p.y > padTop + 18 ? p.y - 9 : p.y + 15;
+      endLabel = `<text x="${p.x.toFixed(1)}" y="${valY.toFixed(1)}" text-anchor="end" fill="${col}" font-size="${isMobile ? 10.5 : 11.5}" font-weight="800">${valTxt}</text>`;
+    }
     return `<g>
-      <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${p.isStart ? 3.5 : (p.isLive ? 6 : 5)}" fill="${col}" stroke="#fff" stroke-width="1.8"/>
-      ${p.isStart ? '' : `<text x="${p.x.toFixed(1)}" y="${valY.toFixed(1)}" text-anchor="${anchor}" fill="${col}" font-size="10.5" font-weight="800">${valTxt}</text>`}
-      <text x="${p.x.toFixed(1)}" y="${h - 6}" text-anchor="${anchor}" fill="#334155" font-size="10.5" font-weight="700">${p.label}</text>
+      <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${rDot}" fill="${col}" stroke="#fff" stroke-width="1.5"/>
+      ${endLabel}
+      ${showX ? `<text x="${p.x.toFixed(1)}" y="${h - 6}" text-anchor="${anchor}" fill="#475569" font-size="${isMobile ? 9.5 : 10.5}" font-weight="700">${p.shortLbl}</text>` : ''}
     </g>`;
   }).join('');
 
-  wrap.innerHTML = `<svg viewBox="0 0 ${w} ${h}">
+  wrap.innerHTML = `<svg id="tradeSvg" viewBox="0 0 ${w} ${h}" width="100%" height="100%" style="cursor:crosshair;touch-action:pan-y;">
     <defs>
       <linearGradient id="tradeGrad" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.18"/>
         <stop offset="100%" stop-color="${strokeColor}" stop-opacity="0.02"/>
       </linearGradient>
     </defs>
-    <line x1="${padX}" y1="${zeroY.toFixed(1)}" x2="${w - padX}" y2="${zeroY.toFixed(1)}" stroke="#64748b" stroke-dasharray="4 4" stroke-width="1.2"/>
-    <text x="${padX}" y="${Math.max(12, zeroY - 5)}" fill="#475569" font-size="10.5" font-weight="700">Initial Capital ${fmtJpy(baseline)} (¥0)</text>
+    ${gridHtml}
     <path d="${areaD}" fill="url(#tradeGrad)" />
-    <path d="${pathD}" fill="none" stroke="${strokeColor}" stroke-width="2.8" stroke-linecap="round" />
+    <path d="${pathD}" fill="none" stroke="${strokeColor}" stroke-width="2.5" stroke-linecap="round" />
+    <line id="tradeCrossV" x1="0" y1="${padTop}" x2="0" y2="${(h - padBot).toFixed(1)}" stroke="rgba(15,23,42,0.3)" stroke-width="1" stroke-dasharray="3 3" style="display:none;"/>
     ${dots}
   </svg>`;
+
+  const svg = document.getElementById('tradeSvg');
+  const crossV = document.getElementById('tradeCrossV');
+  if (svg && crossV) {
+    const inspectAt = (clientX) => {
+      const rect = svg.getBoundingClientRect();
+      const relX = ((clientX - rect.left) / rect.width) * w;
+      const tNorm = Math.max(0, Math.min(1, (relX - padL) / Math.max(1, plotW)));
+      const idx = Math.round(tNorm * (coords.length - 1));
+      const p = coords[idx];
+      if (!p) return;
+      crossV.setAttribute('x1', p.x.toFixed(1));
+      crossV.setAttribute('x2', p.x.toFixed(1));
+      crossV.style.display = 'block';
+      setLegend(p);
+    };
+    const resetLegend = () => {
+      crossV.style.display = 'none';
+      setLegend(lastPt);
+    };
+    svg.addEventListener('mousemove', (ev) => inspectAt(ev.clientX));
+    svg.addEventListener('mouseleave', resetLegend);
+    svg.addEventListener('touchstart', (ev) => { if (ev.touches && ev.touches[0]) inspectAt(ev.touches[0].clientX); }, { passive: true });
+    svg.addEventListener('touchmove', (ev) => { if (ev.touches && ev.touches[0]) inspectAt(ev.touches[0].clientX); }, { passive: true });
+    svg.addEventListener('touchend', resetLegend);
+  }
 }
 
 async function refresh() {
@@ -1278,6 +1376,7 @@ function renderMarketChart() {
 
 window.addEventListener('resize', () => {
   if (latestCandles && latestCandles.length) renderMarketChart();
+  if (latestStatusData) renderChart(latestStatusData.trade_history, latestStatusData.baseline_jpy, latestStatusData.open_positions, latestStatusData.in_trade_pnl_jpy);
 });
 
 refresh();
