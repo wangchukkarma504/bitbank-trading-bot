@@ -30,3 +30,15 @@ state_paper.json
 .agents/
 .DS_Store
 Thumbs.db
+
+# Unused / legacy local scripts & experiments (not part of the active Bitbank bot)
+forex_bot/
+scripts/
+*.sh
+!install_and_run.sh
+!start.sh
+!stop.sh
+/*.py
+/*.md
+!README.md
+!GEMINI.md
