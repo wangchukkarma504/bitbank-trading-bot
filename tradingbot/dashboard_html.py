@@ -264,6 +264,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <option value="avax_jpy">AVAX / JPY</option>
           <option value="dot_jpy">DOT / JPY</option>
           <option value="ltc_jpy">LTC / JPY</option>
+          <option value="boba_jpy">BOBA / JPY</option>
         </select>
         <div id="tfBtns" style="display:flex;gap:4px;">
           <button class="btn-glass" style="padding:4px 9px;font-size:11px;" onclick="setChartTf('5min', this)">5m</button>
@@ -333,7 +334,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>10-Pair Market Radar (5 Margin + 5 Spot Altcoins)</h2>
+    <h2>11-Pair Market Radar (5 Margin + 6 Spot Altcoins)</h2>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Pair</th><th>Bias</th><th>Conviction</th><th>Entry</th><th>Stop</th><th>TP</th><th>Wick</th><th>Depth</th></tr></thead>
@@ -381,6 +382,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="field">
       <label>Custom Goal Target (JPY) — <span style="color:var(--muted);font-weight:500;">0 = Auto-adjust (2x / 5x / 10x)</span></label>
       <input id="cfgGoalJpy" type="number" min="0" step="1000" placeholder="0 = Auto 2x" />
+    </div>
+    <div class="field">
+      <label>Force Profit Close (JPY) — <span style="color:var(--muted);font-weight:500;">Auto-take profit at net JPY (0 = Normal flow)</span></label>
+      <input id="cfgForceProfitJpy" type="number" min="0" step="100" placeholder="e.g. 2000 (0 = disabled)" />
     </div>
     <div class="field">
       <label>Account Trading Mode</label>
@@ -661,7 +666,7 @@ async function refresh() {
 
     document.getElementById('capStatus').textContent = (d.capital_limit_jpy
       ? `Cap: ${fmtJpy(d.capital_limit_jpy)} (Live Equity: ${fmtJpy(d.equity_jpy)})`
-      : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`) + (d.allow_shorts === false ? ' • Spot Long-Only' : ' • Long + Short');
+      : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`) + (d.allow_shorts === false ? ' • Spot Long-Only' : ' • Long + Short') + (d.force_profit_close_jpy ? ` • Auto TP: ${fmtJpy(d.force_profit_close_jpy)}` : '');
     const capInput = document.getElementById('cfgCapJpy');
     capInput.placeholder = `Current Live: ${fmtJpy(d.equity_jpy)} (0 = use 100%)`;
     if (d.capital_limit_jpy && !capInput.value && document.activeElement !== capInput) {
@@ -678,6 +683,10 @@ async function refresh() {
     const shortSel = document.getElementById('cfgAllowShorts');
     if (shortSel && document.activeElement !== shortSel && d.allow_shorts !== undefined) {
       shortSel.value = d.allow_shorts ? 'true' : 'false';
+    }
+    const fpcInput = document.getElementById('cfgForceProfitJpy');
+    if (fpcInput && document.activeElement !== fpcInput && !fpcInput.dataset.dirty) {
+      fpcInput.value = d.force_profit_close_jpy || '';
     }
   } catch (e) {
     console.error(e);
@@ -746,6 +755,7 @@ async function saveConfig() {
   const capRaw = document.getElementById('cfgCapJpy').value.trim();
   const baseRaw = document.getElementById('cfgBaselineJpy').value.trim();
   const goalRaw = document.getElementById('cfgGoalJpy').value.trim();
+  const fpcRaw = document.getElementById('cfgForceProfitJpy').value.trim();
   const allowShortsVal = document.getElementById('cfgAllowShorts').value;
   const payload = {};
   if (apiKey && apiSecret) {
@@ -764,6 +774,9 @@ async function saveConfig() {
   if (goalRaw !== '') {
     payload.goal_target_jpy = Number(goalRaw);
   }
+  if (fpcRaw !== '') {
+    payload.force_profit_close_jpy = Number(fpcRaw);
+  }
   payload.allow_shorts = (allowShortsVal === 'true');
   const r = await fetch('/api/config', {
     method: 'POST',
@@ -775,6 +788,7 @@ async function saveConfig() {
   document.getElementById('cfgApiSecret').value = '';
   delete document.getElementById('cfgBaselineJpy').dataset.dirty;
   delete document.getElementById('cfgGoalJpy').dataset.dirty;
+  delete document.getElementById('cfgForceProfitJpy').dataset.dirty;
   document.getElementById('cfgMsg').textContent = 'Saved: ' + (res.updated && res.updated.length ? res.updated.join(', ') : 'no changes');
   refresh();
 }

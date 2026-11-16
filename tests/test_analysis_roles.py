@@ -86,7 +86,7 @@ class TestModelsAndWhitelist(unittest.TestCase):
 
     def test_margin_pair_whitelist(self):
         expected_margin = {"btc_jpy", "eth_jpy", "sol_jpy", "doge_jpy", "xrp_jpy"}
-        expected_all = expected_margin | {"ada_jpy", "link_jpy", "avax_jpy", "dot_jpy", "ltc_jpy"}
+        expected_all = expected_margin | {"ada_jpy", "link_jpy", "avax_jpy", "dot_jpy", "ltc_jpy", "boba_jpy"}
         self.assertEqual(set(MARGIN_PAIRS.keys()), expected_margin)
         self.assertEqual(set(SUPPORTED_PAIRS), expected_all)
 

@@ -93,11 +93,13 @@ class TradingOrchestrator:
         custom_logger: Optional[logging.Logger] = None,
         capital_limit_jpy: Optional[float] = None,
         allow_shorts: bool = True,
+        force_profit_close_jpy: Optional[float] = None,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
         self.capital_limit_jpy: Optional[float] = capital_limit_jpy
         self.allow_shorts: bool = allow_shorts
+        self.force_profit_close_jpy: Optional[float] = force_profit_close_jpy
         self.mode = mode.lower()
         self.dry_run = (self.mode == "dry-run")
         self.pairs = pairs or list(self.DEFAULT_PAIRS)
@@ -391,20 +393,35 @@ class TradingOrchestrator:
             avg_px = float(pos.get("avg_price", pos.get("average_price", 0.0)))
             amt_str = str(pos.get("open_amount", pos.get("amount", "0.0000")))
 
+            upnl = float(pos.get("unrealized_pnl_jpy", 0.0) or 0.0)
+            notional = float(pos.get("notional_jpy", 0.0) or 0.0)
+            est_net_pnl = upnl - (notional * 0.0012)
+            force_tp_hit = (
+                self.force_profit_close_jpy is not None
+                and self.force_profit_close_jpy > 0
+                and est_net_pnl >= self.force_profit_close_jpy
+            )
+
             # Check extended take-profit blow-off exit condition (+5.0% target for short, +5.0% for long)
             # Intermediate gains (+0.3%, +1.0%, +2.0%, +3.0%, +4.0%+) are handled dynamically by the 5-tier adaptive trailing stop
-            tp_hit = False
-            if side == "short" and avg_px > 0:
+            tp_hit = force_tp_hit
+            if not tp_hit and side == "short" and avg_px > 0:
                 target_px = avg_px * 0.950  # +5.0% take profit blow-off target (~¥780 net profit)
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
-            elif side == "long" and avg_px > 0:
+            elif not tp_hit and side == "long" and avg_px > 0:
                 target_px = avg_px * 1.050  # +5.0% take profit blow-off target
                 if last_px >= target_px and last_px > 0:
                     tp_hit = True
 
             if tp_hit:
-                self.logger.info(f"Target take-profit reached for {pair} {side} at {last_px:,.1f} JPY!")
+                if force_tp_hit:
+                    self.logger.info(
+                        f"[FORCE PROFIT CLOSE] Target ¥{self.force_profit_close_jpy:,.0f} reached "
+                        f"(est. net +¥{est_net_pnl:,.1f}) for {pair} {side} at {last_px:,.1f} JPY!"
+                    )
+                else:
+                    self.logger.info(f"Target take-profit reached for {pair} {side} at {last_px:,.1f} JPY!")
                 if not self.dry_run:
                     # Cancel existing stop orders first
                     mgr = self.risk_manager.get_sync_manager(pair, self.client)
@@ -421,7 +438,14 @@ class TradingOrchestrator:
                                 pass
                     # Cover position at market to bank profit
                     cover_side = "buy" if side == "short" else "sell"
-                    self.client.order(pair, side=cover_side, amount=amt_str, type_="market", position_side=side)
+                    pos_side_arg = side if (pair in MARGIN_PAIRS and side in ("short", "long")) else None
+                    try:
+                        if pos_side_arg:
+                            self.client.order(pair, side=cover_side, amount=amt_str, type_="market", position_side=pos_side_arg)
+                        else:
+                            self.client.order(pair, side=cover_side, amount=amt_str, type_="market")
+                    except Exception as e:
+                        self.logger.error(f"Take-profit close failed on {pair}: {e}")
                 else:
                     self.logger.info(f"[DRY-RUN] Take-Profit execution simulated for {pair}")
 

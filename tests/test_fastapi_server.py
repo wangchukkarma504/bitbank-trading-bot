@@ -254,6 +254,74 @@ class TestFastAPIServer(unittest.TestCase):
         r_html = client.get("/")
         self.assertIn("manifest.webmanifest", r_html.text)
 
+    def test_force_profit_close_config_and_trigger(self):
+        from tradingbot.execution.position_reviewer import PositionReviewResult
+        client, controller, mock_bb = self._make_client(mode="live")
+        r_set = client.post("/api/config", json={"force_profit_close_jpy": 2000.0})
+        self.assertEqual(r_set.status_code, 200)
+        self.assertEqual(controller.orchestrator.force_profit_close_jpy, 2000.0)
+        self.assertEqual(client.get("/api/status").json()["force_profit_close_jpy"], 2000.0)
+
+        # Below threshold (est_net_pnl = 1500 - 240 = 1260 < 2000): should NOT force-close
+        orch = controller.orchestrator
+        orch.pairs = []
+        orch.position_reviewer.review = lambda client=None, allow_shorts=True: PositionReviewResult(
+            baseline_budget_jpy=98874.1,
+            total_equity_jpy=100374.1,
+            free_cash_jpy=100000.0,
+            locked_cash_jpy=0.0,
+            buying_power_jpy=200000.0,
+            pnl_jpy=1500.0,
+            pnl_pct=1.5,
+            open_positions=[{
+                "pair": "btc_jpy",
+                "position_side": "short",
+                "open_amount": "0.0191",
+                "amount": 0.0191,
+                "avg_price": 10338244.0,
+                "last_price": 10259710.0,
+                "unrealized_pnl_jpy": 1500.0,
+                "notional_jpy": 200000.0,
+            }],
+            active_stops=[{"order_id": "555", "pair": "btc_jpy", "position_side": "short", "trigger_price": "10350000"}],
+        )
+        mock_bb.order.reset_mock()
+        orch.tick()
+        # Normal flow may ratchet the stop, but must NOT market-close below target
+        market_calls = [c for c in mock_bb.order.call_args_list if c.kwargs.get("type_") == "market"]
+        self.assertEqual(market_calls, [])
+
+        # Above threshold (est_net_pnl = 2300 - 240 = 2060 >= 2000): SHOULD cancel stop & market-close
+        orch.position_reviewer.review = lambda client=None, allow_shorts=True: PositionReviewResult(
+            baseline_budget_jpy=98874.1,
+            total_equity_jpy=101174.1,
+            free_cash_jpy=100000.0,
+            locked_cash_jpy=0.0,
+            buying_power_jpy=200000.0,
+            pnl_jpy=2300.0,
+            pnl_pct=2.3,
+            open_positions=[{
+                "pair": "btc_jpy",
+                "position_side": "short",
+                "open_amount": "0.0191",
+                "amount": 0.0191,
+                "avg_price": 10338244.0,
+                "last_price": 10217825.0,
+                "unrealized_pnl_jpy": 2300.0,
+                "notional_jpy": 200000.0,
+            }],
+            active_stops=[{"order_id": "555", "pair": "btc_jpy", "position_side": "short", "trigger_price": "10350000"}],
+        )
+        mock_bb.order.reset_mock()
+        orch.tick()
+        mock_bb.cancel.assert_any_call("btc_jpy", "555")
+        mock_bb.order.assert_called_once_with("btc_jpy", side="buy", amount="0.0191", type_="market", position_side="short")
+
+        # Disable with 0
+        r_off = client.post("/api/config", json={"force_profit_close_jpy": 0})
+        self.assertEqual(r_off.status_code, 200)
+        self.assertIsNone(controller.orchestrator.force_profit_close_jpy)
+
 
 if __name__ == "__main__":
     unittest.main()

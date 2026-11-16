@@ -97,6 +97,7 @@ class ConfigRequest(BaseModel):
     baseline_jpy: Optional[float] = None
     goal_target_jpy: Optional[float] = None
     allow_shorts: Optional[bool] = None
+    force_profit_close_jpy: Optional[float] = None
 
 
 class ClosePositionRequest(BaseModel):
@@ -154,6 +155,9 @@ class BotController:
                 self.goal_target_jpy = float(goal)
             if "allow_shorts" in cfg and cfg["allow_shorts"] is not None:
                 self.orchestrator.allow_shorts = bool(cfg["allow_shorts"])
+            fpc = cfg.get("force_profit_close_jpy")
+            if fpc is not None and float(fpc) > 0:
+                self.orchestrator.force_profit_close_jpy = float(fpc)
         except Exception as e:
             logger.warning(f"Could not load bot config: {e}")
 
@@ -168,6 +172,7 @@ class BotController:
                         "baseline_jpy": self.orchestrator.baseline_budget_jpy,
                         "goal_target_jpy": self.goal_target_jpy,
                         "allow_shorts": self.orchestrator.allow_shorts,
+                        "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
                     },
                     f,
                     indent=2,
@@ -183,6 +188,7 @@ class BotController:
         baseline_jpy: Optional[float] = None,
         goal_target_jpy: Optional[float] = None,
         allow_shorts: Optional[bool] = None,
+        force_profit_close_jpy: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Update Bitbank API credentials, capital limit, baseline, goal, and/or short mode live."""
         changed: List[str] = []
@@ -236,6 +242,13 @@ class BotController:
                 self._save_config()
                 changed.append("allow_shorts")
 
+            if force_profit_close_jpy is not None:
+                self.orchestrator.force_profit_close_jpy = (
+                    float(force_profit_close_jpy) if force_profit_close_jpy > 0 else None
+                )
+                self._save_config()
+                changed.append("force_profit_close_jpy")
+
         return {
             "ok": True,
             "updated": changed,
@@ -243,6 +256,7 @@ class BotController:
             "baseline_jpy": self.orchestrator.baseline_budget_jpy,
             "goal_target_jpy": self.goal_target_jpy,
             "allow_shorts": self.orchestrator.allow_shorts,
+            "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
         }
 
     def remove_api_key(self) -> Dict[str, Any]:
@@ -602,6 +616,7 @@ class BotController:
             "baseline_jpy": round(baseline, 2),
             "goal_target_jpy": self.goal_target_jpy,
             "allow_shorts": orch.allow_shorts,
+            "force_profit_close_jpy": orch.force_profit_close_jpy,
             "equity_jpy": round(equity, 2),
             "free_cash_jpy": round(free_cash, 2),
             "buying_power_jpy": round(buying_power, 2),
@@ -874,6 +889,7 @@ self.addEventListener('fetch', (e) => {
                 baseline_jpy=req.baseline_jpy,
                 goal_target_jpy=req.goal_target_jpy,
                 allow_shorts=req.allow_shorts,
+                force_profit_close_jpy=req.force_profit_close_jpy,
             )
         )
 

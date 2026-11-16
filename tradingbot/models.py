@@ -202,6 +202,7 @@ SPOT_ONLY_PAIRS: Dict[str, PairConfig] = {
     "avax_jpy": PairConfig(pair="avax_jpy", price_digits=3, amount_digits=4, min_amount=0.0001),
     "dot_jpy": PairConfig(pair="dot_jpy", price_digits=3, amount_digits=4, min_amount=0.0001),
     "ltc_jpy": PairConfig(pair="ltc_jpy", price_digits=0, amount_digits=4, min_amount=0.0001),
+    "boba_jpy": PairConfig(pair="boba_jpy", price_digits=3, amount_digits=4, min_amount=0.0001),
 }
 
 SUPPORTED_PAIRS: List[str] = list(MARGIN_PAIRS.keys()) + list(SPOT_ONLY_PAIRS.keys())

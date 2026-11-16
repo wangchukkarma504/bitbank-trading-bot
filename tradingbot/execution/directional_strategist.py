@@ -210,21 +210,35 @@ class DirectionalStrategist:
                 long_score += 0.20
                 reasons.append("Regular Bullish RSI Divergence confirmed (Price LL vs RSI HL)")
 
-            # RSI Levels
+            # RSI Levels & Exhaustion Guard (avoid chasing oversold shorts / overbought longs)
             if tech_result.rsi >= 65.0:
                 short_score += 0.05
+                long_score -= 0.10
                 reasons.append(f"RSI overbought ({tech_result.rsi:.1f})")
-            elif tech_result.rsi <= 35.0 and btc_regime_bullish:
-                long_score += 0.05
-                reasons.append(f"RSI oversold ({tech_result.rsi:.1f})")
+            elif tech_result.rsi <= 35.0:
+                short_score -= 0.15
+                reasons.append(f"RSI oversold ({tech_result.rsi:.1f}): short-chase penalty")
+                if btc_regime_bullish:
+                    long_score += 0.05
 
-            # Order Book Depth
+            if rsi_div == RsiDivergence.BULLISH_DIV.value:
+                short_score -= 0.10
+                reasons.append("Bullish RSI divergence caution on short")
+            elif rsi_div == RsiDivergence.BEARISH_DIV.value:
+                long_score -= 0.10
+
+            # Order Book Depth & Opposing Wall Guard
             if depth_ratio < 0.80:
                 short_score += 0.10
                 reasons.append(f"Order book depth heavy on asks (ratio {depth_ratio:.2f})")
-            elif depth_ratio > 1.25 and btc_regime_bullish:
+            elif depth_ratio >= 1.80:
+                short_score -= 0.10
+                reasons.append(f"Heavy bid support ({depth_ratio:.2f}): short-into-wall penalty")
+            if depth_ratio > 1.25 and btc_regime_bullish:
                 long_score += 0.10
                 reasons.append(f"Order book depth heavy on bids (ratio {depth_ratio:.2f})")
+            elif depth_ratio <= 0.55:
+                long_score -= 0.10
 
             # Liquidity Walls
             if res_wall:
@@ -247,8 +261,8 @@ class DirectionalStrategist:
                 if summary:
                     reasons.append(f"Macro Catalyst: {summary}")
 
-        short_conviction = min(1.0, round(short_score, 2))
-        long_conviction = min(1.0, round(long_score, 2)) if btc_regime_bullish else 0.0
+        short_conviction = min(1.0, max(0.0, round(short_score, 2)))
+        long_conviction = min(1.0, max(0.0, round(long_score, 2))) if btc_regime_bullish else 0.0
 
         # =====================================================================
         # Signal Action & Target Pricing
@@ -264,7 +278,7 @@ class DirectionalStrategist:
             elif res_wall and res_wall >= best_ask:
                 entry_px = res_wall
             else:
-                entry_px = max(best_ask, last_px)
+                entry_px = max(best_ask, last_px) * 1.001  # Wait for +0.10% maker pullback instead of chasing
 
             # Hard Stop Loss: above resistance wall or 1.2% above entry
             if res_wall and res_wall > entry_px:
@@ -290,7 +304,7 @@ class DirectionalStrategist:
             elif sup_wall and sup_wall <= best_bid:
                 entry_px = sup_wall
             else:
-                entry_px = min(best_bid, last_px)
+                entry_px = min(best_bid, last_px) * 0.999  # Wait for -0.10% maker dip instead of chasing
 
             # Hard Stop Loss: below support wall or 1.2% below entry
             if sup_wall and sup_wall < entry_px:
