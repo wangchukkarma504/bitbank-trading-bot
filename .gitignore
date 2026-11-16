@@ -21,6 +21,7 @@ build/
 monitor_log.md
 equity_history.json
 loss_lessons.json
+bot_config.json
 state.json
 state_paper.json
 

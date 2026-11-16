@@ -344,6 +344,27 @@ class TestAntiChurnGuards(unittest.TestCase):
         orch.tick()
         orch.client.order.assert_called_once_with("boba_jpy", side="sell", amount="5000.0000", type_="market")
 
+    def test_sub_minimum_sizing_returns_zero_and_baseline_resets_peak(self):
+        from tradingbot.execution.risk_manager import calculate_margin_short_size, calculate_spot_long_size
+
+        qty_m, _, not_m = calculate_margin_short_size(equity_jpy=100.0, pair="btc_jpy", entry_price=10_500_000.0)
+        self.assertEqual(qty_m, 0.0)
+        self.assertEqual(not_m, 0.0)
+
+        qty_s, _, not_s = calculate_spot_long_size(
+            equity_jpy=100.0, free_cash_jpy=100.0, pair="btc_jpy", entry_price=10_500_000.0
+        )
+        self.assertEqual(qty_s, 0.0)
+        self.assertEqual(not_s, 0.0)
+
+        # Updating baseline after a withdrawal must reset _peak_equity_jpy
+        from tradingbot.server import BotController
+        orch = self._build_orchestrator()
+        orch._peak_equity_jpy = 150000.0
+        ctrl = BotController(orch, history_path="", config_path="", env_path="", auto_start=False)
+        ctrl.update_config(baseline_jpy=90000.0)
+        self.assertEqual(orch._peak_equity_jpy, 90000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

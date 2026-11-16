@@ -236,6 +236,7 @@ class BotController:
                 self.orchestrator.baseline_budget_jpy = bval
                 self.orchestrator.position_reviewer.baseline_budget_jpy = bval
                 self.orchestrator.dashboard.starting_budget = bval
+                self.orchestrator._peak_equity_jpy = bval
                 self._save_config()
                 changed.append("baseline_jpy")
 
@@ -354,6 +355,8 @@ class BotController:
     def resume(self) -> Dict[str, Any]:
         with self.lock:
             self.emergency_stopped = False
+            self.orchestrator._circuit_breaker_until = 0.0
+            self.orchestrator._global_cooldown_until = 0.0
             self.running = True
         return {"status": "RUNNING", "running": self.running}
 

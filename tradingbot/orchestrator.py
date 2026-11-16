@@ -314,20 +314,24 @@ class TradingOrchestrator:
                 pair = naked_pos["pair"]
                 full_amt = float(naked_pos.get("open_amount", naked_pos.get("amount", naked_pos.get("unprotected_amount", 0.0))))
                 side = naked_pos.get("position_side", "short")
+                pos_type = naked_pos.get("position_type", "margin")
+                stop_pos_side = None if pos_type == "spot" else side
                 last_px = float(naked_pos.get("last_price", naked_pos.get("avg_price", 0.0)))
-                amt_str = f"{full_amt:.4f}"
+                cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair)
+                ad = cfg.amount_digits if cfg else 4
+                amt_str = f"{full_amt:.{ad}f}"
 
                 # Calculate emergency stop loss level (1.5% away)
                 stop_trig = last_px * 1.015 if side == "short" else last_px * 0.985
 
                 if not self.dry_run:
-                    self.logger.info(f"Attaching immediate protective stop on naked {pair} short at {stop_trig}...")
+                    self.logger.info(f"Attaching immediate protective stop on naked {pair} {side} at {stop_trig}...")
                     try:
                         self.risk_manager.attach_protective_stop(
                             pair=pair,
                             amount=amt_str,
                             trigger_price=stop_trig,
-                            position_side=side,
+                            position_side=stop_pos_side,
                             client=self.client,
                         )
                     except Exception as e:
@@ -432,27 +436,35 @@ class TradingOrchestrator:
                 else:
                     self.logger.info(f"Target take-profit reached for {pair} {side} at {last_px:,.1f} JPY!")
                 if not self.dry_run:
-                    # Cancel existing stop orders first
+                    # Cancel all existing active orders/stops on pair first so nothing remains locked
                     mgr = self.risk_manager.get_sync_manager(pair, self.client)
+                    cancelled_ids = set()
                     if mgr.current_stop_id:
                         try:
                             self.client.cancel(pair, mgr.current_stop_id)
+                            cancelled_ids.add(mgr.current_stop_id)
                         except Exception:
                             pass
-                    for s in review_res.active_stops:
-                        if s.get("pair") == pair:
+                    for o in (list(review_res.active_stops) + list(review_res.active_orders)):
+                        oid = o.get("order_id")
+                        if o.get("pair") == pair and oid is not None and oid not in cancelled_ids:
                             try:
-                                self.client.cancel(pair, s["order_id"])
+                                self.client.cancel(pair, oid)
+                                cancelled_ids.add(oid)
                             except Exception:
                                 pass
-                    # Cover position at market to bank profit
+                    # Cover position at market to bank profit / execute stop
                     cover_side = "buy" if side == "short" else "sell"
-                    pos_side_arg = side if (pair in MARGIN_PAIRS and side in ("short", "long")) else None
+                    pos_side_arg = side if (pair in MARGIN_PAIRS and side in ("short", "long") and pos.get("position_type", "margin") != "spot") else None
                     try:
                         if pos_side_arg:
                             self.client.order(pair, side=cover_side, amount=amt_str, type_="market", position_side=pos_side_arg)
                         else:
                             self.client.order(pair, side=cover_side, amount=amt_str, type_="market")
+                        mgr.current_stop_id = None
+                        mgr.current_stop_level = None
+                        mgr.current_stop_qty = None
+                        self.position_reviewer.spot_entry_prices.pop(pair, None)
                     except Exception as e:
                         self.logger.error(f"Take-profit close failed on {pair}: {e}")
                 else:

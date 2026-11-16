@@ -53,6 +53,8 @@ def calculate_margin_short_size(
     # Floor quantization to AD digits
     ad = cfg.amount_digits
     quantized_qty = math.floor(target_qty * (10 ** ad) + 1e-9) / (10 ** ad)
+    if quantized_qty < cfg.min_amount:
+        return 0.0, cfg.format_amount(0.0), 0.0
     formatted_qty = f"{quantized_qty:.{ad}f}"
     actual_notional = quantized_qty * entry_price
 
@@ -79,6 +81,8 @@ def calculate_spot_long_size(
 
     ad = cfg.amount_digits
     quantized_qty = math.floor(target_qty * (10 ** ad) + 1e-9) / (10 ** ad)
+    if quantized_qty < cfg.min_amount:
+        return 0.0, cfg.format_amount(0.0), 0.0
     formatted_qty = f"{quantized_qty:.{ad}f}"
     actual_notional = quantized_qty * entry_price
 
@@ -157,8 +161,9 @@ class StopSyncManager:
         return new_order
 
     def emergency_market_cover(self, reason: str = "") -> None:
-        """Emergency liquidate position to prevent unhedged exposure."""
+        """Emergency liquidate position (margin or spot) to prevent unhedged exposure."""
         self.emergency_covered = True
+        closed_any = False
         try:
             positions = self.client.margin_positions()
             for p in positions:
@@ -172,8 +177,23 @@ class StopSyncManager:
                         type_="market",
                         position_side=p.get("position_side"),
                     )
+                    closed_any = True
         except BitbankError:
             pass
+        if not closed_any:
+            try:
+                base_asset = self.pair.split("_")[0]
+                assets = self.client._get("/user/assets").get("assets", [])
+                for a in assets:
+                    if a.get("asset") == base_asset:
+                        free_amt = float(a.get("free_amount", 0.0))
+                        cfg = MARGIN_PAIRS.get(self.pair) or SPOT_ONLY_PAIRS.get(self.pair)
+                        min_amt = cfg.min_amount if cfg else 0.0001
+                        ad = cfg.amount_digits if cfg else 4
+                        if free_amt >= min_amt:
+                            self.client.order(self.pair, side="sell", amount=f"{free_amt:.{ad}f}", type_="market")
+            except Exception:
+                pass
 
 
 class RiskManager:
