@@ -95,6 +95,69 @@ DASHBOARD_PASS=
 
 ---
 
+## Auto-Learn Engine (`LossLearningEngine`)
+
+The bot includes an automatic self-learning module in [`tradingbot/analysis/loss_learner.py`](tradingbot/analysis/loss_learner.py) that monitors every closed trade, diagnoses losing trades, persists lessons to `loss_lessons.json`, and applies **bounded, reversible** safety adjustments so the bot stops repeating the same mistake.
+
+### How It Works
+When an open position closes, `LossLearningEngine.record_trade_close()` checks whether `exit_equity_jpy < entry_equity_jpy * 0.9995`:
+
+1. **If the trade was a loss:**
+   - Diagnoses the most likely root cause using the trade's hold duration, macro bias, orderbook depth ratio, and entry conviction:
+     | Root Cause | Trigger Condition | Automatic Adaptation Applied |
+     |---|---|---|
+     | `FAST_WHIPSAW_STOP` | Closed in `< 180s` | Raises `pair` min conviction (`+0.08`) **and** widens `stop_width_mult` by `+0.10x` (up to `1.25x` max) |
+     | `COUNTER_MACRO_BIAS` | Shorted into `BULLISH` macro or longed into `BEARISH` macro | Raises `pair` min conviction (`+0.08`) |
+     | `ORDERBOOK_IMBALANCE_TRAP` | Shorted with bid-heavy book (`depth_ratio >= 1.8`) or longed with ask-heavy book (`depth_ratio <= 0.55`) | Raises `pair` min conviction (`+0.08`) **and** enables `orderbook_penalty_active` (`-0.10` conviction penalty when book opposes trade) |
+     | `WEAK_CONVICTION_ENTRY` | Entry conviction `< 0.70` | Raises `pair` min conviction (`+0.08`) |
+     | `TREND_REVERSAL_EXHAUSTION` | Default when none of the above triggered | Raises `pair` min conviction (`+0.08`) |
+   - **Consecutive Loss Cooldown Scaling:** If a pair loses `2` or more times in a row, its post-loss cooldown scales by `streak` (up to `3.0x` via `get_pair_cooldown_multiplier()`).
+   - **Hard Safety Bounds:**
+     - `MAX_CONVICTION_BOOST = 0.25` (effective minimum conviction is always capped at `0.92` so the bot never locks itself out permanently).
+     - `MAX_STOP_WIDTH_MULT = 1.25` (stops are never widened beyond `+25%` and hard exchange-side stops always remain mandatory).
+     - `MAX_COOLDOWN_MULT = 3.0`
+
+2. **If the trade was a win or breakeven:**
+   - Resets `pair_loss_streaks[pair] = 0`.
+   - Gradually relaxes `pair_conviction_boost[pair]` by `-0.05` and `stop_width_mult` by `-0.05` (back toward `1.0x`), so temporary caution fades as market conditions improve.
+
+### Concrete Examples
+
+- **Example 1 — Fast Whipsaw Stop on `btc_jpy`:**
+  1. Bot enters a `btc_jpy` short with base `MIN_CONVICTION = 0.70`, and gets stopped out in `65s` for `-1,200 JPY`.
+  2. `diagnose_loss()` classifies it as **`FAST_WHIPSAW_STOP`** (`hold_duration_sec < 180s`).
+  3. Auto-Learn logs: `[AUTO-LEARN] Loss detected on btc_jpy (-1,200.0 JPY / -1.20%, 65s) | Cause=FAST_WHIPSAW_STOP | Fix=btc_jpy min_conv+0.08, stop_width_mult=1.10x`.
+  4. On the next `btc_jpy` signal, `btc_jpy` now requires **`0.78`** conviction instead of `0.70`, and its stop distance is automatically given **`1.10x`** breathing room.
+
+- **Example 2 — Orderbook Imbalance Trap on `sol_jpy`:**
+  1. Bot shorts `sol_jpy` while bids outweigh asks (`depth_ratio = 2.1 >= 1.8`) and loses `-1,000 JPY` after `400s`.
+  2. `diagnose_loss()` classifies it as **`ORDERBOOK_IMBALANCE_TRAP`**.
+  3. Auto-Learn enables `orderbook_imbalance_filter=ON` and raises `sol_jpy` min conviction by `+0.08`. Future opposing-book signals receive a `-0.10` conviction penalty.
+
+- **Example 3 — Recovery After a Win:**
+  1. `btc_jpy` later closes a winning trade (`+2,400 JPY`).
+  2. Auto-Learn resets `btc_jpy` loss streak to `0`, lowers `pair_conviction_boost["btc_jpy"]` by `0.05`, and reduces `stop_width_mult` from `1.10x` back down to `1.05x`.
+
+---
+
+## Anti-Churn & Capital Preservation Guardrails
+
+- **Exchange-Side Stops:** Every open margin position is audited on every tick by `PositionReviewer` and protected by a native Bitbank `stop` order (`StopSyncManager`). Duplicate/partial stops are automatically deduplicated so full-coverage stops are always retained.
+- **Circuit Breakers:** Pauses new entries for 30 minutes if **2 consecutive losses** occur, **5+ entries** happen within 1 hour, or equity experiences a rapid drawdown from peak.
+- **Stale Limit Cleanup:** Resting maker limit orders older than 10 minutes, whose signal flipped, or whose target price drifted `> 1.0%` are cancelled automatically.
+
+---
+
+## Progressive Web App (PWA) & Mobile Support
+
+The dashboard is a full **Progressive Web App** served over HTTPS (e.g. `https://your-domain.example.com` via Cloudflare Tunnel) with custom app icons (`/static/icon-180.png`, `icon-192.png`, `icon-512.png`), `/manifest.webmanifest`, and `/sw.js`:
+
+- **iPhone / iPad (Safari):** Open the dashboard URL → tap **Share** → **Add to Home Screen**.
+- **Android / Desktop (Chrome / Edge):** Tap **Menu → Install App** inside the dashboard (or click the browser address bar's **Install** icon).
+- **Mobile-Responsive Candlestick Chart:** The top **Live Bitbank Price Chart** automatically scales to your phone width (`1:1` crisp rendering, 36-candle mobile window, touch crosshair for OHLC inspection, and **Entry / Stop Loss / TP / Last** price overlays).
+
+---
+
 ## Running Tests
 
 Run the unit and integration test suite (uses `MockBitbank` — no live API calls):

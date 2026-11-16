@@ -6,6 +6,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>Bitbank Autonomous AI Trading Desk</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#0f172a" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Bitbank Bot" />
+<link rel="apple-touch-icon" href="/static/icon-180.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png" />
 <style>
   :root {
     --bg-grad: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 45%, #ede9fe 100%);
@@ -207,6 +214,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="badge" id="stateBadge">LOADING</span>
         <button class="btn-glass" onclick="closeHeaderMenu(); openSettings()">Settings</button>
         <button class="btn-glass" onclick="togglePause()" id="pauseBtn">Pause Bot</button>
+        <button class="btn-glass" id="installPwaBtn" onclick="installPwa()" style="display:none;color:#2563eb;font-weight:700;">Install App</button>
         <button class="btn-glass" onclick="window.location.href='/logout'">Logout</button>
       </div>
     </div>
@@ -967,6 +975,25 @@ window.addEventListener('resize', () => {
 
 refresh();
 setInterval(refresh, 5000);
+
+let deferredPwaPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPwaPrompt = e;
+  const btn = document.getElementById('installPwaBtn');
+  if (btn) btn.style.display = 'block';
+});
+async function installPwa() {
+  if (!deferredPwaPrompt) return;
+  deferredPwaPrompt.prompt();
+  await deferredPwaPrompt.userChoice;
+  deferredPwaPrompt = null;
+  const btn = document.getElementById('installPwaBtn');
+  if (btn) btn.style.display = 'none';
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 </script>
 </body>
 </html>"""

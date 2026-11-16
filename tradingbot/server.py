@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 import uvicorn
@@ -787,6 +787,58 @@ def create_app(controller: BotController) -> FastAPI:
     @app.get("/health")
     def health():
         return {"ok": True, "state": controller.get_status()["state"]}
+
+    @app.get("/manifest.webmanifest")
+    def pwa_manifest():
+        manifest = {
+            "name": "Bitbank AI Trading Desk",
+            "short_name": "Bitbank Bot",
+            "description": "Autonomous Bitbank Spot Long & Margin Short Trading Dashboard",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#e0f2fe",
+            "theme_color": "#0f172a",
+            "icons": [
+                {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+                {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            ],
+        }
+        return JSONResponse(manifest, media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    def pwa_service_worker():
+        sw_code = """const CACHE_NAME = 'bitbank-bot-v1';
+const STATIC_ASSETS = ['/static/icon-192.png', '/static/icon-512.png', '/static/icon-180.png', '/manifest.webmanifest'];
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE_NAME).then((c) => c.addAll(STATIC_ASSETS)).catch(() => {}));
+  self.skipWaiting();
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(self.clients.claim());
+});
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  if (url.pathname.startsWith('/api/') || e.request.method !== 'GET') return;
+  if (STATIC_ASSETS.includes(url.pathname)) {
+    e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
+    return;
+  }
+  e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+});
+"""
+        return Response(content=sw_code, media_type="application/javascript")
+
+    @app.get("/static/{filename}")
+    def pwa_static_icon(filename: str):
+        allowed = {"icon-180.png", "icon-192.png", "icon-512.png"}
+        if filename not in allowed:
+            raise HTTPException(status_code=404, detail="Not found")
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+        path = os.path.join(static_dir, filename)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="Icon not found")
+        return FileResponse(path, media_type="image/png")
 
     @app.get("/api/status", dependencies=[Depends(require_auth)])
     def api_status():

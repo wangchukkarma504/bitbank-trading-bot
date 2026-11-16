@@ -235,6 +235,25 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertGreaterEqual(len(data["candles"]), 2)
         self.assertEqual(data["candles"][0]["o"], 10350000.0)
 
+    def test_pwa_manifest_service_worker_and_icons(self):
+        client, _, _ = self._make_client(mode="live")
+        r_man = client.get("/manifest.webmanifest")
+        self.assertEqual(r_man.status_code, 200)
+        man = r_man.json()
+        self.assertEqual(man["display"], "standalone")
+        self.assertEqual(man["short_name"], "Bitbank Bot")
+
+        r_sw = client.get("/sw.js")
+        self.assertEqual(r_sw.status_code, 200)
+        self.assertIn("bitbank-bot-v1", r_sw.text)
+
+        r_icon = client.get("/static/icon-192.png")
+        self.assertEqual(r_icon.status_code, 200)
+        self.assertEqual(r_icon.headers["content-type"], "image/png")
+
+        r_html = client.get("/")
+        self.assertIn("manifest.webmanifest", r_html.text)
+
 
 if __name__ == "__main__":
     unittest.main()
