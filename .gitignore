@@ -1,0 +1,32 @@
+# Secrets & environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Runtime state & logs
+*.log
+*.lock
+.server.pid
+monitor_log.md
+equity_history.json
+loss_lessons.json
+state.json
+state_paper.json
+
+# IDE & local agent directories
+.vscode/
+.claude/
+.agents/
+.DS_Store
+Thumbs.db
