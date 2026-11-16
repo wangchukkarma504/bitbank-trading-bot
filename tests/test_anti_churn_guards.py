@@ -310,6 +310,40 @@ class TestAntiChurnGuards(unittest.TestCase):
         mgr = orch.risk_manager.get_sync_manager("btc_jpy", orch.client)
         self.assertEqual(mgr.current_stop_id, 222)
 
+    def test_spot_long_detection_dust_filter_and_inprocess_stop(self):
+        orch = self._build_orchestrator()
+        orch.mode = "live"
+        orch.dry_run = False
+        orch.pairs = []
+        orch.position_reviewer.spot_entry_prices["boba_jpy"] = 2.400
+
+        def fake_get(path, params=None):
+            if path == "/user/assets":
+                return {
+                    "assets": [
+                        {"asset": "jpy", "free_amount": "80000.0", "locked_amount": "0.0"},
+                        {"asset": "boba", "free_amount": "5000.0", "locked_amount": "0.0"},
+                        {"asset": "mana", "free_amount": "0.0001", "locked_amount": "0.0"},  # dust
+                    ]
+                }
+            return {"orders": []}
+
+        orch.client._get = fake_get
+        orch.client.margin_positions.return_value = []
+        # 2.350 is -2.08% below 2.400 -> triggers -1.5% in-process stop for spot-only boba_jpy
+        orch.client.ticker.side_effect = lambda p: {"last": "2.350"} if p == "boba_jpy" else {"last": "1.0"}
+
+        rev = orch.position_reviewer.review(client=orch.client)
+        self.assertEqual(len(rev.open_positions), 1)
+        pos0 = rev.open_positions[0]
+        self.assertEqual(pos0["pair"], "boba_jpy")
+        self.assertEqual(pos0["position_side"], "long")
+        self.assertEqual(pos0["position_type"], "spot")
+        self.assertTrue(rev.is_fully_protected)
+
+        orch.tick()
+        orch.client.order.assert_called_once_with("boba_jpy", side="sell", amount="5000.0000", type_="market")
+
 
 if __name__ == "__main__":
     unittest.main()

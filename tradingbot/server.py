@@ -30,7 +30,7 @@ import uvicorn
 
 from tradingbot.bitbank import Bitbank
 from tradingbot.dashboard_html import DASHBOARD_HTML, render_login_html
-from tradingbot.models import SUPPORTED_PAIRS
+from tradingbot.models import MARGIN_PAIRS, PairConfig, SPOT_ONLY_PAIRS, SUPPORTED_PAIRS
 from tradingbot.orchestrator import TradingOrchestrator
 
 
@@ -98,6 +98,7 @@ class ConfigRequest(BaseModel):
     goal_target_jpy: Optional[float] = None
     allow_shorts: Optional[bool] = None
     force_profit_close_jpy: Optional[float] = None
+    allow_counter_trend_longs: Optional[bool] = None
 
 
 class ClosePositionRequest(BaseModel):
@@ -158,6 +159,10 @@ class BotController:
             fpc = cfg.get("force_profit_close_jpy")
             if fpc is not None and float(fpc) > 0:
                 self.orchestrator.force_profit_close_jpy = float(fpc)
+            if "allow_counter_trend_longs" in cfg and cfg["allow_counter_trend_longs"] is not None:
+                val = bool(cfg["allow_counter_trend_longs"])
+                self.orchestrator.allow_counter_trend_longs = val
+                self.orchestrator.directional_strategist.allow_counter_trend_longs = val
         except Exception as e:
             logger.warning(f"Could not load bot config: {e}")
 
@@ -173,6 +178,7 @@ class BotController:
                         "goal_target_jpy": self.goal_target_jpy,
                         "allow_shorts": self.orchestrator.allow_shorts,
                         "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
+                        "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
                     },
                     f,
                     indent=2,
@@ -189,6 +195,7 @@ class BotController:
         goal_target_jpy: Optional[float] = None,
         allow_shorts: Optional[bool] = None,
         force_profit_close_jpy: Optional[float] = None,
+        allow_counter_trend_longs: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Update Bitbank API credentials, capital limit, baseline, goal, and/or short mode live."""
         changed: List[str] = []
@@ -249,6 +256,13 @@ class BotController:
                 self._save_config()
                 changed.append("force_profit_close_jpy")
 
+            if allow_counter_trend_longs is not None:
+                val = bool(allow_counter_trend_longs)
+                self.orchestrator.allow_counter_trend_longs = val
+                self.orchestrator.directional_strategist.allow_counter_trend_longs = val
+                self._save_config()
+                changed.append("allow_counter_trend_longs")
+
         return {
             "ok": True,
             "updated": changed,
@@ -257,6 +271,7 @@ class BotController:
             "goal_target_jpy": self.goal_target_jpy,
             "allow_shorts": self.orchestrator.allow_shorts,
             "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
+            "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
         }
 
     def remove_api_key(self) -> Dict[str, Any]:
@@ -388,6 +403,28 @@ class BotController:
             except Exception as e:
                 errors.append(f"Position close error: {e}")
 
+            try:
+                assets_res = client._get("/user/assets").get("assets", [])
+                for a in assets_res:
+                    asset = a.get("asset", "")
+                    pair = f"{asset}_jpy"
+                    if pair not in SUPPORTED_PAIRS:
+                        continue
+                    free_amt = float(a.get("free_amount", 0.0))
+                    if free_amt <= 0.0001:
+                        continue
+                    try:
+                        last_px = float((client.ticker(pair) or {}).get("last", 0.0))
+                    except Exception:
+                        last_px = 0.0
+                    if free_amt * last_px >= 500.0:
+                        cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair) or PairConfig(pair=pair, price_digits=3, amount_digits=4)
+                        amt_str = f"{free_amt:.{cfg.amount_digits}f}"
+                        res = client.order(pair, side="sell", amount=amt_str, type_="market")
+                        closed.append({"pair": pair, "side": "spot", "amount": amt_str, "order_id": res.get("order_id")})
+            except Exception as e:
+                errors.append(f"Spot close error: {e}")
+
         report = {
             "status": "EMERGENCY_STOPPED",
             "timestamp": int(time.time()),
@@ -445,8 +482,8 @@ class BotController:
             except Exception as e:
                 errors.append(f"Margin close error on {pair}: {e}")
 
-            # Also handle spot-only long balances if no margin position was closed
-            if not closed and (position_side is None or position_side == "spot"):
+            # Also handle spot-only / spot long balances if no margin position was closed
+            if not closed and (position_side in (None, "spot", "long")):
                 try:
                     base_asset = pair.split("_")[0]
                     assets_res = client._get("/user/assets").get("assets", [])
@@ -454,7 +491,8 @@ class BotController:
                         if a.get("asset") == base_asset:
                             free_amt = float(a.get("free_amount", 0.0))
                             if free_amt > 0.0001:
-                                amt_str = f"{free_amt:.4f}"
+                                cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair) or PairConfig(pair=pair, price_digits=3, amount_digits=4)
+                                amt_str = f"{free_amt:.{cfg.amount_digits}f}"
                                 res = client.order(pair, side="sell", amount=amt_str, type_="market")
                                 closed.append({
                                     "pair": pair,
@@ -617,6 +655,7 @@ class BotController:
             "goal_target_jpy": self.goal_target_jpy,
             "allow_shorts": orch.allow_shorts,
             "force_profit_close_jpy": orch.force_profit_close_jpy,
+            "allow_counter_trend_longs": orch.allow_counter_trend_longs,
             "equity_jpy": round(equity, 2),
             "free_cash_jpy": round(free_cash, 2),
             "buying_power_jpy": round(buying_power, 2),
@@ -890,6 +929,7 @@ self.addEventListener('fetch', (e) => {
                 goal_target_jpy=req.goal_target_jpy,
                 allow_shorts=req.allow_shorts,
                 force_profit_close_jpy=req.force_profit_close_jpy,
+                allow_counter_trend_longs=req.allow_counter_trend_longs,
             )
         )
 

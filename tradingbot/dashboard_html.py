@@ -180,22 +180,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .modal-backdrop.open { display: flex; }
   .modal {
-    width: 100%; max-width: 500px; background: var(--glass-strong);
-    backdrop-filter: blur(22px); border: 1px solid #fff; border-radius: 20px;
-    padding: 24px; box-shadow: 0 20px 50px rgba(15,23,42,0.18);
+    width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    background: var(--glass-strong); backdrop-filter: blur(22px); border: 1px solid #fff; border-radius: 20px;
+    padding: 0 22px 20px; box-shadow: 0 20px 50px rgba(15,23,42,0.22);
   }
-  .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .modal-head {
+    position: sticky; top: 0; z-index: 10; background: rgba(255,255,255,0.95);
+    backdrop-filter: blur(12px); display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 0 12px; margin-bottom: 14px; border-bottom: 1px solid rgba(15,23,42,0.08);
+  }
   .modal-head h3 { margin: 0; font-size: 18px; font-weight: 800; }
-  .field { margin-bottom: 14px; }
-  .field label { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
-  .field input {
-    width: 100%; padding: 10px 12px; border-radius: 10px; font-size: 14px;
-    border: 1px solid rgba(15,23,42,0.14); background: rgba(255,255,255,0.9); color: var(--text);
+  .modal-foot {
+    position: sticky; bottom: 0; z-index: 10; background: rgba(255,255,255,0.95);
+    backdrop-filter: blur(12px); display: flex; gap: 10px; justify-content: flex-end;
+    padding: 12px 0 4px; margin-top: 14px; border-top: 1px solid rgba(15,23,42,0.08);
+  }
+  .sec-card {
+    background: rgba(255,255,255,0.72); border: 1px solid rgba(15,23,42,0.09);
+    border-radius: 14px; padding: 14px; margin-bottom: 12px;
+  }
+  .sec-title { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.7px; color: #2563eb; margin-bottom: 10px; }
+  .field { margin-bottom: 12px; }
+  .field:last-child { margin-bottom: 0; }
+  .field-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .field label { display: block; font-size: 13px; font-weight: 700; color: var(--text); margin: 0; }
+  .val-pill { font-size: 12px; font-weight: 800; color: #2563eb; background: rgba(37,99,235,0.1); padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+  .field input[type="number"], .field input[type="text"], .field input[type="password"] {
+    width: 100%; padding: 10px 12px; border-radius: 10px; font-size: 15px;
+    border: 1px solid rgba(15,23,42,0.14); background: rgba(255,255,255,0.95); color: var(--text);
+  }
+  .range-slider {
+    width: 100%; height: 8px; -webkit-appearance: none; appearance: none;
+    background: rgba(37,99,235,0.18); border-radius: 999px; outline: none; margin: 8px 0; cursor: pointer;
+  }
+  .range-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 22px; height: 22px; border-radius: 50%;
+    background: #2563eb; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(37,99,235,0.4); cursor: pointer;
+  }
+  .range-slider::-moz-range-thumb {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #2563eb; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(37,99,235,0.4); cursor: pointer;
+  }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip-btn {
+    padding: 5px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+    background: rgba(15,23,42,0.06); color: var(--text); border: 1px solid rgba(15,23,42,0.1); cursor: pointer;
+  }
+  .chip-btn.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .seg-group { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: rgba(15,23,42,0.06); padding: 4px; border-radius: 12px; }
+  .seg-btn {
+    padding: 9px 10px; border-radius: 9px; font-size: 12.5px; font-weight: 700; text-align: center;
+    background: transparent; color: var(--muted); border: none; cursor: pointer;
+  }
+  .seg-btn.active { background: #fff; color: var(--text); box-shadow: 0 2px 8px rgba(15,23,42,0.1); }
+  details.api-details summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--muted); list-style: none; display: flex; justify-content: space-between; align-items: center; }
+  @media (max-width: 720px) {
+    .modal-backdrop { align-items: flex-end; padding: 0; }
+    .modal { max-width: 100%; max-height: 88vh; border-radius: 22px 22px 0 0; padding: 0 16px 18px; }
+    .field input[type="number"], .field input[type="text"], .field input[type="password"] { font-size: 16px; }
   }
   .key-banner {
     display: flex; justify-content: space-between; align-items: center; gap: 10px;
-    padding: 12px 14px; border-radius: 12px; margin-bottom: 16px;
-    background: rgba(255,255,255,0.75); border: 1px solid rgba(15,23,42,0.1);
+    padding: 12px 14px; border-radius: 12px; margin-bottom: 12px;
+    background: rgba(255,255,255,0.8); border: 1px solid rgba(15,23,42,0.1);
   }
 </style>
 </head>
@@ -360,45 +408,102 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <button class="btn-danger-sm" id="removeKeyBtn" onclick="removeApiKey()" style="display:none;">Remove API Key</button>
     </div>
 
-    <div class="field">
-      <label id="keyActionLabel">Add / Replace Bitbank API Key</label>
-      <input id="cfgApiKey" type="text" placeholder="Paste Bitbank API Key" />
-    </div>
-    <div class="field">
-      <label>Bitbank API Secret</label>
-      <input id="cfgApiSecret" type="password" placeholder="Paste Bitbank API Secret" />
-    </div>
-    <div class="field">
-      <label>Total Capital to Use (JPY) — <span id="capStatus">100% Account Equity</span></label>
-      <input id="cfgCapJpy" type="number" min="0" step="100" placeholder="e.g. 100000 (0 = use 100% of account)" />
-    </div>
-    <div class="field">
-      <label>Baseline Capital (JPY) — <span style="color:var(--muted);font-weight:500;">Update when depositing/withdrawing</span></label>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <input id="cfgBaselineJpy" type="number" min="0" step="100" placeholder="e.g. 98874.1" style="flex:1;" />
-        <button type="button" class="btn-glass" style="padding:10px 12px;white-space:nowrap;" onclick="addDeposit(10000)">+¥10,000</button>
+    <div class="sec-card">
+      <div class="sec-title">Trading Mode &amp; Auto Take-Profit</div>
+
+      <div class="field">
+        <div class="field-row"><label>Account Trading Mode</label></div>
+        <div class="seg-group">
+          <button type="button" class="seg-btn active" id="modeBothBtn" onclick="setModeToggle(true)">Long + Short (Margin)</button>
+          <button type="button" class="seg-btn" id="modeSpotBtn" onclick="setModeToggle(false)">Spot Long-Only</button>
+        </div>
+        <input type="hidden" id="cfgAllowShorts" value="true" />
+        <div class="hint">Use <b>Spot Long-Only</b> if your Bitbank account does not have margin/short access.</div>
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="cfgForceProfitJpy">Force Profit Close</label>
+          <span class="val-pill" id="fpcBadge">Off (Normal Flow)</span>
+        </div>
+        <input type="range" class="range-slider" id="cfgForceProfitSlider" min="0" max="10000" step="500" value="0" oninput="onForceProfitSlider(this.value)" />
+        <div class="chip-row">
+          <button type="button" class="chip-btn" onclick="setForceProfit(0)">Off</button>
+          <button type="button" class="chip-btn" onclick="setForceProfit(1000)">¥1,000</button>
+          <button type="button" class="chip-btn" onclick="setForceProfit(2000)">¥2,000</button>
+          <button type="button" class="chip-btn" onclick="setForceProfit(5000)">¥5,000</button>
+          <input id="cfgForceProfitJpy" type="number" min="0" step="100" placeholder="Custom JPY" style="width:110px;padding:5px 9px;font-size:13px;" oninput="onForceProfitInput(this.value)" />
+        </div>
+        <div class="hint">Auto-closes when net profit (after 0.12% fee) hits this target. Trailing stop still protects you below it.</div>
       </div>
     </div>
-    <div class="field">
-      <label>Custom Goal Target (JPY) — <span style="color:var(--muted);font-weight:500;">0 = Auto-adjust (2x / 5x / 10x)</span></label>
-      <input id="cfgGoalJpy" type="number" min="0" step="1000" placeholder="0 = Auto 2x" />
+
+    <div class="sec-card">
+      <div class="sec-title">Capital &amp; Goal Targets</div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="cfgCapJpy">Max Capital to Trade</label>
+          <span class="val-pill" id="capBadge">100% Equity</span>
+        </div>
+        <input type="range" class="range-slider" id="cfgCapSlider" min="0" max="500000" step="10000" value="0" oninput="onCapSlider(this.value)" />
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="button" class="chip-btn" onclick="setCapPreset(0)">100% (No Cap)</button>
+          <input id="cfgCapJpy" type="number" min="0" step="1000" placeholder="0 = use 100%" style="flex:1;" oninput="onCapInput(this.value)" />
+        </div>
+        <div class="hint" id="capStatus">100% Account Equity</div>
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="cfgBaselineJpy">Starting Baseline (JPY)</label>
+          <span class="val-pill" id="baseBadge">--</span>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <input id="cfgBaselineJpy" type="number" min="0" step="100" placeholder="e.g. 98874.1" style="flex:1;min-width:120px;" oninput="this.dataset.dirty='1'" />
+          <button type="button" class="chip-btn" onclick="addDeposit(10000)">+¥10,000</button>
+          <button type="button" class="chip-btn" onclick="useLiveEquityBaseline()">Match Live</button>
+        </div>
+        <div class="hint">Used to calculate your overall PnL and auto-scale 2x / 5x / 10x goals.</div>
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="cfgGoalJpy">Custom Goal Target</label>
+          <span class="val-pill" id="goalBadge">Auto (2x/5x/10x)</span>
+        </div>
+        <input type="range" class="range-slider" id="cfgGoalSlider" min="0" max="1000000" step="10000" value="0" oninput="onGoalSlider(this.value)" />
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="button" class="chip-btn" onclick="setGoalPreset(0)">Auto 2x/5x/10x</button>
+          <input id="cfgGoalJpy" type="number" min="0" step="1000" placeholder="0 = Auto" style="flex:1;" oninput="onGoalInput(this.value)" />
+        </div>
+      </div>
     </div>
-    <div class="field">
-      <label>Force Profit Close (JPY) — <span style="color:var(--muted);font-weight:500;">Auto-take profit at net JPY (0 = Normal flow)</span></label>
-      <input id="cfgForceProfitJpy" type="number" min="0" step="100" placeholder="e.g. 2000 (0 = disabled)" />
+
+    <div class="sec-card">
+      <details class="api-details">
+        <summary>
+          <span>Bitbank API Keys (Optional Update)</span>
+          <span style="font-size:11px;color:#2563eb;">Expand ▾</span>
+        </summary>
+        <div style="margin-top:12px;">
+          <div class="field">
+            <label id="keyActionLabel">Add / Replace Bitbank API Key</label>
+            <input id="cfgApiKey" type="text" placeholder="Paste Bitbank API Key" />
+          </div>
+          <div class="field">
+            <label>Bitbank API Secret</label>
+            <input id="cfgApiSecret" type="password" placeholder="Paste Bitbank API Secret" />
+          </div>
+        </div>
+      </details>
     </div>
-    <div class="field">
-      <label>Account Trading Mode</label>
-      <select id="cfgAllowShorts" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(15,23,42,0.16);background:rgba(255,255,255,0.9);font-size:14px;">
-        <option value="true">Long + Short (Spot + Margin)</option>
-        <option value="false">Spot Long-Only (No Margin / No Shorts)</option>
-      </select>
-    </div>
-    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+
+    <div id="cfgMsg" style="margin-top:6px;font-size:13px;font-weight:700;color:var(--green);"></div>
+    <div class="modal-foot">
       <button class="btn-glass" onclick="closeSettings()">Cancel</button>
-      <button class="btn-primary" onclick="saveConfig()">Save & Apply</button>
+      <button class="btn-primary" style="flex:1;" onclick="saveConfig()">Save &amp; Apply</button>
     </div>
-    <div id="cfgMsg" style="margin-top:10px;font-size:13px;font-weight:600;color:var(--green);"></div>
   </div>
 </div>
 
@@ -669,24 +774,36 @@ async function refresh() {
       : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`) + (d.allow_shorts === false ? ' • Spot Long-Only' : ' • Long + Short') + (d.force_profit_close_jpy ? ` • Auto TP: ${fmtJpy(d.force_profit_close_jpy)}` : '');
     const capInput = document.getElementById('cfgCapJpy');
     capInput.placeholder = `Current Live: ${fmtJpy(d.equity_jpy)} (0 = use 100%)`;
-    if (d.capital_limit_jpy && !capInput.value && document.activeElement !== capInput) {
-      capInput.value = d.capital_limit_jpy;
+    if (!capInput.dataset.dirty && document.activeElement !== capInput) {
+      const capV = Number(d.capital_limit_jpy || 0);
+      capInput.value = capV > 0 ? capV : '';
+      const cs = document.getElementById('cfgCapSlider');
+      if (cs) cs.value = Math.min(500000, capV);
+      document.getElementById('capBadge').textContent = capV > 0 ? fmtJpy(capV) : '100% Equity';
     }
     const baseInput = document.getElementById('cfgBaselineJpy');
     if (baseInput && document.activeElement !== baseInput && !baseInput.dataset.dirty) {
       baseInput.value = d.baseline_jpy;
+      document.getElementById('baseBadge').textContent = fmtJpy(d.baseline_jpy);
     }
     const goalInput = document.getElementById('cfgGoalJpy');
     if (goalInput && document.activeElement !== goalInput && !goalInput.dataset.dirty) {
-      goalInput.value = d.goal_target_jpy || '';
+      const gV = Number(d.goal_target_jpy || 0);
+      goalInput.value = gV > 0 ? gV : '';
+      const gs = document.getElementById('cfgGoalSlider');
+      if (gs) gs.value = Math.min(1000000, gV);
+      document.getElementById('goalBadge').textContent = gV > 0 ? fmtJpy(gV) : 'Auto (2x/5x/10x)';
     }
-    const shortSel = document.getElementById('cfgAllowShorts');
-    if (shortSel && document.activeElement !== shortSel && d.allow_shorts !== undefined) {
-      shortSel.value = d.allow_shorts ? 'true' : 'false';
+    if (d.allow_shorts !== undefined && !document.getElementById('cfgAllowShorts').dataset.dirty) {
+      setModeToggle(Boolean(d.allow_shorts), false);
     }
     const fpcInput = document.getElementById('cfgForceProfitJpy');
     if (fpcInput && document.activeElement !== fpcInput && !fpcInput.dataset.dirty) {
-      fpcInput.value = d.force_profit_close_jpy || '';
+      const fV = Number(d.force_profit_close_jpy || 0);
+      fpcInput.value = fV > 0 ? fV : '';
+      const fs = document.getElementById('cfgForceProfitSlider');
+      if (fs) fs.value = Math.min(10000, fV);
+      document.getElementById('fpcBadge').textContent = fV > 0 ? fmtJpy(fV) : 'Off (Normal Flow)';
     }
   } catch (e) {
     console.error(e);
@@ -742,11 +859,74 @@ async function removeApiKey() {
   refresh();
 }
 
+function setModeToggle(allow, markDirty = true) {
+  const el = document.getElementById('cfgAllowShorts');
+  el.value = allow ? 'true' : 'false';
+  if (markDirty) el.dataset.dirty = '1';
+  document.getElementById('modeBothBtn').className = 'seg-btn' + (allow ? ' active' : '');
+  document.getElementById('modeSpotBtn').className = 'seg-btn' + (!allow ? ' active' : '');
+}
+
+function onForceProfitSlider(v) { setForceProfit(Number(v)); }
+function onForceProfitInput(v) {
+  const n = Math.max(0, Number(v || 0));
+  document.getElementById('cfgForceProfitJpy').dataset.dirty = '1';
+  document.getElementById('cfgForceProfitSlider').value = Math.min(10000, n);
+  document.getElementById('fpcBadge').textContent = n > 0 ? fmtJpy(n) : 'Off (Normal Flow)';
+}
+function setForceProfit(val) {
+  const inp = document.getElementById('cfgForceProfitJpy');
+  inp.value = val > 0 ? val : '';
+  inp.dataset.dirty = '1';
+  document.getElementById('cfgForceProfitSlider').value = Math.min(10000, val);
+  document.getElementById('fpcBadge').textContent = val > 0 ? fmtJpy(val) : 'Off (Normal Flow)';
+}
+
+function onCapSlider(v) { setCapPreset(Number(v)); }
+function onCapInput(v) {
+  const n = Math.max(0, Number(v || 0));
+  document.getElementById('cfgCapJpy').dataset.dirty = '1';
+  document.getElementById('cfgCapSlider').value = Math.min(500000, n);
+  document.getElementById('capBadge').textContent = n > 0 ? fmtJpy(n) : '100% Equity';
+}
+function setCapPreset(val) {
+  const inp = document.getElementById('cfgCapJpy');
+  inp.value = val > 0 ? val : 0;
+  inp.dataset.dirty = '1';
+  document.getElementById('cfgCapSlider').value = Math.min(500000, val);
+  document.getElementById('capBadge').textContent = val > 0 ? fmtJpy(val) : '100% Equity';
+}
+
+function onGoalSlider(v) { setGoalPreset(Number(v)); }
+function onGoalInput(v) {
+  const n = Math.max(0, Number(v || 0));
+  document.getElementById('cfgGoalJpy').dataset.dirty = '1';
+  document.getElementById('cfgGoalSlider').value = Math.min(1000000, n);
+  document.getElementById('goalBadge').textContent = n > 0 ? fmtJpy(n) : 'Auto (2x/5x/10x)';
+}
+function setGoalPreset(val) {
+  const inp = document.getElementById('cfgGoalJpy');
+  inp.value = val > 0 ? val : 0;
+  inp.dataset.dirty = '1';
+  document.getElementById('cfgGoalSlider').value = Math.min(1000000, val);
+  document.getElementById('goalBadge').textContent = val > 0 ? fmtJpy(val) : 'Auto (2x/5x/10x)';
+}
+
 function addDeposit(amount) {
   const el = document.getElementById('cfgBaselineJpy');
   const cur = Number(el.value || 0);
-  el.value = (cur + amount).toFixed(1);
+  const next = (cur + amount).toFixed(1);
+  el.value = next;
   el.dataset.dirty = '1';
+  document.getElementById('baseBadge').textContent = fmtJpy(next);
+}
+
+function useLiveEquityBaseline() {
+  if (!latestStatusData || !latestStatusData.equity_jpy) return;
+  const el = document.getElementById('cfgBaselineJpy');
+  el.value = latestStatusData.equity_jpy;
+  el.dataset.dirty = '1';
+  document.getElementById('baseBadge').textContent = fmtJpy(latestStatusData.equity_jpy);
 }
 
 async function saveConfig() {
@@ -776,6 +956,8 @@ async function saveConfig() {
   }
   if (fpcRaw !== '') {
     payload.force_profit_close_jpy = Number(fpcRaw);
+  } else if (document.getElementById('cfgForceProfitJpy').dataset.dirty) {
+    payload.force_profit_close_jpy = 0;
   }
   payload.allow_shorts = (allowShortsVal === 'true');
   const r = await fetch('/api/config', {
@@ -786,9 +968,11 @@ async function saveConfig() {
   const res = await r.json();
   document.getElementById('cfgApiKey').value = '';
   document.getElementById('cfgApiSecret').value = '';
+  delete document.getElementById('cfgCapJpy').dataset.dirty;
   delete document.getElementById('cfgBaselineJpy').dataset.dirty;
   delete document.getElementById('cfgGoalJpy').dataset.dirty;
   delete document.getElementById('cfgForceProfitJpy').dataset.dirty;
+  delete document.getElementById('cfgAllowShorts').dataset.dirty;
   document.getElementById('cfgMsg').textContent = 'Saved: ' + (res.updated && res.updated.length ? res.updated.join(', ') : 'no changes');
   refresh();
 }

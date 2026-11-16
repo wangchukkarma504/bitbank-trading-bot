@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from tradingbot.bitbank import Bitbank, BitbankError
 from tradingbot.models import (
     MARGIN_PAIRS,
+    SPOT_ONLY_PAIRS,
     SUPPORTED_PAIRS,
     Candle,
     MarketTrendResult,
@@ -94,12 +95,14 @@ class TradingOrchestrator:
         capital_limit_jpy: Optional[float] = None,
         allow_shorts: bool = True,
         force_profit_close_jpy: Optional[float] = None,
+        allow_counter_trend_longs: bool = True,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
         self.capital_limit_jpy: Optional[float] = capital_limit_jpy
         self.allow_shorts: bool = allow_shorts
         self.force_profit_close_jpy: Optional[float] = force_profit_close_jpy
+        self.allow_counter_trend_longs: bool = allow_counter_trend_longs
         self.mode = mode.lower()
         self.dry_run = (self.mode == "dry-run")
         self.pairs = pairs or list(self.DEFAULT_PAIRS)
@@ -112,7 +115,9 @@ class TradingOrchestrator:
         self.tech_analyst = TechnicalDepthAnalyst(self.client)
         self.macro_analyst = MacroCatalystAnalyst(cache_ttl_sec=300.0)
         self.alt_scanner = AltcoinMomentumScanner(self.client)
-        self.directional_strategist = DirectionalStrategist(self.client)
+        self.directional_strategist = DirectionalStrategist(
+            self.client, allow_counter_trend_longs=self.allow_counter_trend_longs
+        )
         self.risk_manager = RiskManager(self.client)
         self.dashboard = AsciiDashboard(starting_budget=self.baseline_budget_jpy)
 
@@ -410,8 +415,12 @@ class TradingOrchestrator:
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
             elif not tp_hit and side == "long" and avg_px > 0:
-                target_px = avg_px * 1.050  # +5.0% take profit blow-off target
+                target_px = avg_px * (1.030 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs) else 1.050)
                 if last_px >= target_px and last_px > 0:
+                    tp_hit = True
+                elif pair in SPOT_ONLY_PAIRS and last_px > 0 and last_px <= avg_px * 0.985:
+                    # In-process -1.5% hard stop for spot-only pairs that lack native Bitbank stop orders
+                    self.logger.warning(f"[SPOT STOP] {pair} hit -1.5% stop ({last_px} <= {avg_px * 0.985:.4f}); closing.")
                     tp_hit = True
 
             if tp_hit:
@@ -583,6 +592,8 @@ class TradingOrchestrator:
                         f"qty={sizing_plan.formatted_amount}, px={best_candidate.entry_price}"
                     )
                     try:
+                        if pos_type == "spot":
+                            self.position_reviewer.spot_entry_prices[best_candidate.pair] = best_candidate.entry_price
                         order_res = self.risk_manager.place_maker_limit_order(
                             pair=best_candidate.pair,
                             side=order_side,
@@ -592,13 +603,13 @@ class TradingOrchestrator:
                             client=self.client,
                         )
                         self._recent_entry_timestamps.append(now_ts)
-                        # If filled immediately, attach native exchange stop immediately
-                        if order_res.get("status") == "FULLY_FILLED":
+                        # If filled immediately, attach native exchange stop for margin-capable pairs
+                        if order_res.get("status") == "FULLY_FILLED" and best_candidate.pair in MARGIN_PAIRS:
                             self.risk_manager.attach_protective_stop(
                                 pair=best_candidate.pair,
                                 amount=sizing_plan.formatted_amount,
                                 trigger_price=adj_stop_px,
-                                position_side=pos_side,
+                                position_side="short" if best_candidate.action == "SHORT" else None,
                                 client=self.client,
                             )
                     except Exception as e:

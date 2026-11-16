@@ -322,6 +322,11 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(r_off.status_code, 200)
         self.assertIsNone(controller.orchestrator.force_profit_close_jpy)
 
+        # Altcoin breakout scalps are automatically enabled by default
+        self.assertTrue(controller.orchestrator.allow_counter_trend_longs)
+        self.assertTrue(controller.orchestrator.directional_strategist.allow_counter_trend_longs)
+        self.assertTrue(client.get("/api/status").json()["allow_counter_trend_longs"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from tradingbot.models import MARGIN_PAIRS, SUPPORTED_PAIRS
+from tradingbot.models import MARGIN_PAIRS, SPOT_ONLY_PAIRS, SUPPORTED_PAIRS
 
 
 @dataclass
@@ -42,9 +42,12 @@ class PositionReviewer:
 
     BASELINE_BUDGET: float = 10001.0
 
+    SPOT_MIN_NOTIONAL_JPY: float = 500.0
+
     def __init__(self, bitbank_client=None, baseline_budget_jpy: float = 10001.0):
         self.client = bitbank_client
         self.baseline_budget_jpy = baseline_budget_jpy
+        self.spot_entry_prices: Dict[str, float] = {}
 
     def review(self, client=None, allow_shorts: bool = True) -> PositionReviewResult:
         """Perform full position review and account equity audit."""
@@ -116,16 +119,42 @@ class PositionReviewer:
             }
             open_positions.append(pos_data)
 
-        # 3. Valuate Crypto Holdings (for spot)
+        # 3. Valuate Crypto Holdings (for spot equity + track active Spot Long positions)
         crypto_val_jpy = 0.0
+        margin_long_pairs = {p["pair"] for p in open_positions if p.get("position_side") == "long"}
+        active_spot_pairs = set()
         for coin, h in crypto_holdings.items():
             pair = f"{coin}_jpy"
             try:
                 tk = active_client.ticker(pair)
                 last_px = float(tk.get("last", 0.0))
-                crypto_val_jpy += h["total"] * last_px
+                amt = h["total"]
+                notional = amt * last_px
+                crypto_val_jpy += notional
+                if pair in SUPPORTED_PAIRS and notional >= self.SPOT_MIN_NOTIONAL_JPY and pair not in margin_long_pairs:
+                    active_spot_pairs.add(pair)
+                    entry_px = float(self.spot_entry_prices.get(pair) or last_px)
+                    if entry_px <= 0:
+                        entry_px = last_px
+                    self.spot_entry_prices[pair] = entry_px
+                    pnl = amt * (last_px - entry_px)
+                    open_positions.append({
+                        "pair": pair,
+                        "position_side": "long",
+                        "position_type": "spot",
+                        "open_amount": f"{amt:.4f}",
+                        "amount": amt,
+                        "average_price": f"{entry_px:.4f}",
+                        "avg_price": entry_px,
+                        "last_price": last_px,
+                        "unrealized_pnl_jpy": pnl,
+                        "notional_jpy": notional,
+                    })
             except Exception:
                 pass
+        for stale_p in list(self.spot_entry_prices.keys()):
+            if stale_p not in active_spot_pairs:
+                self.spot_entry_prices.pop(stale_p, None)
 
         # 4. Compute Equity and Buying Power
         if hasattr(active_client, "calculate_total_equity") and callable(active_client.calculate_total_equity):
@@ -196,9 +225,14 @@ class PositionReviewer:
         for pos in open_positions:
             pair = pos["pair"]
             side = pos["position_side"]
+            pos_type = pos.get("position_type", "margin")
             amt = float(pos["amount"])
             avg_px = float(pos["avg_price"])
             last_px = float(pos["last_price"])
+
+            # Spot-only altcoins do not support native Bitbank stop orders (protected in-process at -1.5%)
+            if pos_type == "spot" and pair in SPOT_ONLY_PAIRS:
+                continue
 
             req_side = "buy" if side == "short" else "sell"
 
@@ -206,7 +240,7 @@ class PositionReviewer:
             matching_stops = [
                 s for s in active_stops
                 if s.get("pair") == pair
-                and s.get("position_side") == side
+                and (s.get("position_side") == side or (pos_type == "spot" and s.get("position_side") is None))
                 and s.get("side") == req_side
                 and s.get("status") in ("UNFILLED", "INACTIVE")
             ]

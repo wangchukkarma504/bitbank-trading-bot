@@ -64,8 +64,9 @@ class DirectionalStrategist:
 
     MIN_CONVICTION: float = 0.60
 
-    def __init__(self, bitbank_client=None):
+    def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = True):
         self.client = bitbank_client
+        self.allow_counter_trend_longs = allow_counter_trend_longs
         self.trend_analyst = MarketTrendAnalyst(bitbank_client)
         self.wick_analyst = WickAnatomyAnalyst(bitbank_client)
         self.tech_analyst = TechnicalDepthAnalyst(bitbank_client)
@@ -164,11 +165,25 @@ class DirectionalStrategist:
             long_score += 0.15
 
         # --- B. BTC Macro Filter Enforcement ---
+        alt_breakout_ok = (
+            self.allow_counter_trend_longs
+            and pair in SPOT_ONLY_PAIRS
+            and align_15m == TrendAlignment.BULLISH.value
+            and align_1h != TrendAlignment.BEARISH.value
+            and (trend_1h is None or last_px > trend_1h.ema20)
+            and (tech_result is None or tech_result.rsi < 68.0)
+        )
+        long_eligible = btc_regime_bullish or alt_breakout_ok
+
         if not btc_regime_bullish:
-            # Macro downtrend: strictly suppress Longs and award boost to Shorts
+            # Macro downtrend: award boost to Shorts; gate Longs unless altcoin breakout scalp qualifies
             short_score += 0.15
-            reasons.append("BTC macro filter confirms BEAR REGIME (below 4h EMA200): Spot Longs gated")
-            long_score = 0.0  # HARD GATE: Spot longs strictly suppressed
+            if alt_breakout_ok:
+                long_score += 0.20
+                reasons.append("BTC bear regime, but altcoin 15m/1h breakout scalp qualified")
+            else:
+                reasons.append("BTC macro filter confirms BEAR REGIME (below 4h EMA200): Spot Longs gated")
+                long_score = 0.0  # HARD GATE: Spot longs strictly suppressed
         else:
             reasons.append("BTC macro filter confirms BULL REGIME (above 4h EMA200)")
 
@@ -185,7 +200,7 @@ class DirectionalStrategist:
                     short_score += 0.05
                     reasons.append(f"Persistent overhead supply ratio ({wick_result.up_lo_ratio:.2f})")
             elif wick_cls == WickType.BULLISH_ABSORPTION.value:
-                if btc_regime_bullish:
+                if long_eligible:
                     long_score += 0.20
                     reasons.append(f"Lower absorption hammer wick ({wick_result.lower_wick_pct}% wick)")
                     if wick_result.is_exhaustion:
@@ -206,7 +221,7 @@ class DirectionalStrategist:
             if rsi_div == RsiDivergence.BEARISH_DIV.value:
                 short_score += 0.20
                 reasons.append("Regular Bearish RSI Divergence confirmed (Price HH vs RSI LH)")
-            elif rsi_div == RsiDivergence.BULLISH_DIV.value and btc_regime_bullish:
+            elif rsi_div == RsiDivergence.BULLISH_DIV.value and long_eligible:
                 long_score += 0.20
                 reasons.append("Regular Bullish RSI Divergence confirmed (Price LL vs RSI HL)")
 
@@ -218,7 +233,7 @@ class DirectionalStrategist:
             elif tech_result.rsi <= 35.0:
                 short_score -= 0.15
                 reasons.append(f"RSI oversold ({tech_result.rsi:.1f}): short-chase penalty")
-                if btc_regime_bullish:
+                if long_eligible:
                     long_score += 0.05
 
             if rsi_div == RsiDivergence.BULLISH_DIV.value:
@@ -234,7 +249,7 @@ class DirectionalStrategist:
             elif depth_ratio >= 1.80:
                 short_score -= 0.10
                 reasons.append(f"Heavy bid support ({depth_ratio:.2f}): short-into-wall penalty")
-            if depth_ratio > 1.25 and btc_regime_bullish:
+            if depth_ratio > 1.25 and long_eligible:
                 long_score += 0.10
                 reasons.append(f"Order book depth heavy on bids (ratio {depth_ratio:.2f})")
             elif depth_ratio <= 0.55:
@@ -244,7 +259,7 @@ class DirectionalStrategist:
             if res_wall:
                 short_score += 0.05
                 reasons.append(f"Resistance wall identified at {res_wall}")
-            if sup_wall and btc_regime_bullish:
+            if sup_wall and long_eligible:
                 long_score += 0.05
                 reasons.append(f"Support wall identified at {sup_wall}")
 
@@ -262,7 +277,7 @@ class DirectionalStrategist:
                     reasons.append(f"Macro Catalyst: {summary}")
 
         short_conviction = min(1.0, max(0.0, round(short_score, 2)))
-        long_conviction = min(1.0, max(0.0, round(long_score, 2))) if btc_regime_bullish else 0.0
+        long_conviction = min(1.0, max(0.0, round(long_score, 2))) if long_eligible else 0.0
 
         # =====================================================================
         # Signal Action & Target Pricing
@@ -293,7 +308,7 @@ class DirectionalStrategist:
             else:
                 tp_px = entry_px - (2.0 * risk_dist)
 
-        elif long_conviction >= self.MIN_CONVICTION and btc_regime_bullish:
+        elif long_conviction >= self.MIN_CONVICTION and long_eligible:
             action = "LONG"
             position_type = "spot"
             conviction = long_conviction

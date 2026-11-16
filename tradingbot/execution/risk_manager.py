@@ -100,7 +100,7 @@ class StopSyncManager:
         self,
         qty: str,
         trigger_price: float,
-        position_side: str = "short",
+        position_side: Optional[str] = "short",
         max_retries: int = 2,
     ) -> Optional[Dict[str, Any]]:
         """Place new stop FIRST, verify matching engine order_id, then cancel old stop.
@@ -117,14 +117,16 @@ class StopSyncManager:
         new_order = None
         for attempt in range(max_retries):
             try:
-                new_order = self.client.order(
-                    pair=self.pair,
-                    side=side,
-                    amount=qty,
-                    type_="stop",
-                    position_side=position_side,
-                    trigger_price=trigger_str,
-                )
+                order_kwargs: Dict[str, Any] = {
+                    "pair": self.pair,
+                    "side": side,
+                    "amount": qty,
+                    "type_": "stop",
+                    "trigger_price": trigger_str,
+                }
+                if position_side is not None:
+                    order_kwargs["position_side"] = position_side
+                new_order = self.client.order(**order_kwargs)
                 if new_order and new_order.get("order_id"):
                     break
             except BitbankError:
@@ -342,13 +344,15 @@ class RiskManager:
         """
         active_client = client or self.client
         side = position.get("position_side", "short")
+        pos_type = position.get("position_type", "margin")
         avg_px = float(position.get("avg_price", position.get("average_price", 0.0)))
         amt_str = str(position.get("open_amount", position.get("amount", "0.0")))
         amt = float(amt_str)
 
-        if amt <= 0.0001 or avg_px <= 0:
+        if amt <= 0.0001 or avg_px <= 0 or pair in SPOT_ONLY_PAIRS:
             return None
 
+        stop_pos_side: Optional[str] = None if pos_type == "spot" else side
         meta = MARGIN_PAIRS.get(pair)
         pd = meta.price_digits if meta else 1
 
@@ -465,7 +469,7 @@ class RiskManager:
                 new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0018), pd))
 
             if new_stop is not None and (current_stop is None or new_stop > current_stop + 1e-6):
-                return mgr.sync_stop(amt_str, new_stop, position_side=side)
+                return mgr.sync_stop(amt_str, new_stop, position_side=stop_pos_side)
 
         return None
 
