@@ -365,6 +365,23 @@ class TestAntiChurnGuards(unittest.TestCase):
         ctrl.update_config(baseline_jpy=90000.0)
         self.assertEqual(orch._peak_equity_jpy, 90000.0)
 
+    def test_unfilled_limits_do_not_increment_hourly_entry_cap(self):
+        orch = self._build_orchestrator()
+        now = time.time()
+        # Simulate placing an unfilled limit order without opening a position:
+        # _recent_entry_timestamps must stay empty when no position actually opens.
+        orch._update_churn_guards(_make_review(100000.0, open_positions=[]), now)
+        self.assertEqual(len(orch._recent_entry_timestamps), 0)
+
+        # Once a position actually opens on the exchange, it IS counted once.
+        open_pos = [{"pair": "btc_jpy", "position_side": "short", "unrealized_pnl_jpy": 0.0}]
+        orch._update_churn_guards(_make_review(100000.0, open_positions=open_pos), now + 10)
+        self.assertEqual(len(orch._recent_entry_timestamps), 1)
+
+        # Subsequent ticks with the same open position do not double-count it.
+        orch._update_churn_guards(_make_review(100000.0, open_positions=open_pos), now + 20)
+        self.assertEqual(len(orch._recent_entry_timestamps), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

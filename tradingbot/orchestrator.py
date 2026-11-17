@@ -161,6 +161,7 @@ class TradingOrchestrator:
             if pair and pair not in self._active_tracked_positions:
                 upnl = float(pos.get("unrealized_pnl_jpy", 0.0) or 0.0)
                 self._active_tracked_positions[pair] = equity - upnl
+                self._recent_entry_timestamps.append(now_ts)
                 sig = self.last_signals.get(pair)
                 macro_bias = getattr(self.last_macro_report, "catalyst_bias", "NEUTRAL") if self.last_macro_report else "NEUTRAL"
                 self._active_position_meta[pair] = {
@@ -618,7 +619,6 @@ class TradingOrchestrator:
                             position_side="short" if best_candidate.action == "SHORT" else None,
                             client=self.client,
                         )
-                        self._recent_entry_timestamps.append(now_ts)
                         # If filled immediately, attach native exchange stop for margin-capable pairs
                         if order_res.get("status") == "FULLY_FILLED" and best_candidate.pair in MARGIN_PAIRS:
                             self.risk_manager.attach_protective_stop(

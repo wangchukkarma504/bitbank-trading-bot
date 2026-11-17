@@ -444,9 +444,9 @@ class RiskManager:
             elif gain_pct >= lock_trigger_pct:
                 new_stop = max(min_safe_stop, round(avg_px * (1.0 - lock_profit_pct), pd))
 
-            # Fee-Covered Break-Even Ratchet (+0.75% gain -> lock +0.22% to cover 0.12% taker stop fee)
+            # Fee-Covered Break-Even Ratchet (+0.48% gain -> lock +0.25% to cover 0.12% taker stop fee + slippage)
             elif gain_pct >= be_trigger_pct:
-                new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0022), pd))
+                new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0025), pd))
 
             if new_stop is not None and (current_stop is None or new_stop < current_stop - 1e-6):
                 return mgr.sync_stop(amt_str, new_stop, position_side=side)
@@ -474,9 +474,9 @@ class RiskManager:
             elif gain_pct >= lock_trigger_pct:
                 new_stop = min(max_safe_stop, round(avg_px * (1.0 + lock_profit_pct), pd))
 
-            # Fee-Covered Break-Even Ratchet (+0.75% gain -> lock +0.22% to cover 0.12% taker stop fee)
+            # Fee-Covered Break-Even Ratchet (+0.48% gain -> lock +0.25% to cover 0.12% taker stop fee + slippage)
             elif gain_pct >= be_trigger_pct:
-                new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0022), pd))
+                new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0025), pd))
 
             if new_stop is not None and (current_stop is None or new_stop > current_stop + 1e-6):
                 return mgr.sync_stop(amt_str, new_stop, position_side=stop_pos_side)

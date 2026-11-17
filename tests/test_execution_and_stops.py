@@ -525,7 +525,7 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
         )
         self.assertIsNone(res_noise)
 
-        # Case 2: +0.55% (9,945) -> Fee-covered BE ratchet: 10000 * 0.9978 = 9,978.0 (+0.22% locked)
+        # Case 2: +0.55% (9,945) -> Fee-covered BE ratchet: 10000 * 0.9975 = 9,975.0 (+0.25% locked)
         res_be = rm.evaluate_and_apply_ratchets(
             pair="sol_jpy",
             position=pos,
@@ -534,7 +534,7 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
         )
         self.assertIsNotNone(res_be)
         mgr = rm.get_sync_manager("sol_jpy", self.client)
-        self.assertAlmostEqual(mgr.current_stop_level, 9978.0, places=1)
+        self.assertAlmostEqual(mgr.current_stop_level, 9975.0, places=1)
 
         # Case 3: +0.90% (9,910) -> Early Profit-Lock: 10000 * 0.996 = 9,960.0 (+0.40% locked)
         res_early = rm.evaluate_and_apply_ratchets(
