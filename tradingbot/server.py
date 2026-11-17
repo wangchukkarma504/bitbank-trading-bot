@@ -809,7 +809,15 @@ class BotController:
                 continue
             ts_row = int(row.get("ts") or 0)
             pair_row = str(row.get("pair") or "")
-            if any(h["pair"] == pair_row and abs(h["ts"] - ts_row) <= 25 for h in trade_history):
+            existing = next(
+                (h for h in trade_history if h["pair"] == pair_row and abs(h["ts"] - ts_row) <= 25),
+                None,
+            )
+            if existing is not None:
+                # Merge partial fills of the same manual close rather than dropping the rest
+                if existing.get("source") == "manual":
+                    existing["pnl_jpy"] = round(float(existing["pnl_jpy"]) + pnl, 2)
+                    existing["is_loss"] = existing["pnl_jpy"] < 0
                 continue
             trade_history.append({
                 "pair": pair_row,
