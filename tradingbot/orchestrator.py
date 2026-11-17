@@ -16,7 +16,9 @@ Resilience & Error Handling:
 - Rate-limiting inter-pair spacing (0.2s delay).
 """
 
+import json
 import logging
+import os
 import random
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -85,6 +87,8 @@ class TradingOrchestrator:
     MAX_CONSECUTIVE_LOSSES: int = 2             # 2 consecutive losses trigger circuit breaker
     RAPID_DRAWDOWN_PAUSE_PCT: float = 0.08      # 8% drop from peak equity pauses new entries
     CIRCUIT_BREAKER_PAUSE_SEC: float = 1800.0   # 30 min pause when circuit breaker trips
+    CONSECUTIVE_LOSS_PAUSE_SEC: float = 7200.0  # 2 h pause after consecutive losses (stop-outs cluster in rallies)
+    DAILY_LOSS_LIMIT_PCT: float = 0.03          # No new entries for the rest of the JST day once equity is down 3%
 
     def __init__(
         self,
@@ -96,7 +100,8 @@ class TradingOrchestrator:
         capital_limit_jpy: Optional[float] = None,
         allow_shorts: bool = True,
         force_profit_close_jpy: Optional[float] = None,
-        allow_counter_trend_longs: bool = True,
+        allow_counter_trend_longs: bool = False,
+        daily_state_path: Optional[str] = None,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
@@ -139,8 +144,43 @@ class TradingOrchestrator:
         self._consecutive_losses: int = 0
         self._peak_equity_jpy: float = baseline_budget_jpy
         self._circuit_breaker_until: float = 0.0
+        self._day_key: Optional[str] = None
+        self._day_start_equity_jpy: float = 0.0
+        self._daily_loss_halted: bool = False
+        # Optional file so the daily loss limit survives restarts (None keeps it in memory only)
+        self.daily_state_path: Optional[str] = daily_state_path
+        self._load_daily_state()
         self.loss_learner = LossLearningEngine(state_path="loss_lessons.json")
         self._active_position_meta: Dict[str, Dict[str, Any]] = {}
+
+    def _load_daily_state(self) -> None:
+        if not self.daily_state_path or not os.path.exists(self.daily_state_path):
+            return
+        try:
+            with open(self.daily_state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._day_key = str(data["day_key"])
+            self._day_start_equity_jpy = float(data["day_start_equity_jpy"])
+            self._daily_loss_halted = bool(data.get("halted", False))
+        except Exception as e:
+            self.logger.warning(f"Failed to load daily risk state from {self.daily_state_path}: {e}")
+
+    def _save_daily_state(self) -> None:
+        if not self.daily_state_path:
+            return
+        try:
+            with open(self.daily_state_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "day_key": self._day_key,
+                        "day_start_equity_jpy": round(self._day_start_equity_jpy, 2),
+                        "halted": self._daily_loss_halted,
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception as e:
+            self.logger.warning(f"Failed to save daily risk state to {self.daily_state_path}: {e}")
 
     def _update_churn_guards(self, review_res: PositionReviewResult, now_ts: float) -> None:
         """Track position opens/closes, enforce post-close cooldowns, and trip drawdown/loss circuit breakers."""
@@ -150,6 +190,25 @@ class TradingOrchestrator:
         equity = float(getattr(review_res, "total_equity_jpy", 0.0))
         if equity > self._peak_equity_jpy:
             self._peak_equity_jpy = equity
+
+        # Daily loss limit: measured from the first equity reading of each JST day (or of this process)
+        day_key = time.strftime("%Y-%m-%d", time.gmtime(now_ts + 9 * 3600))
+        if equity > 0 and day_key != self._day_key:
+            self._day_key = day_key
+            self._day_start_equity_jpy = equity
+            self._daily_loss_halted = False
+            self._save_daily_state()
+        if (
+            not self._daily_loss_halted
+            and self._day_start_equity_jpy > 0
+            and 0 < equity <= self._day_start_equity_jpy * (1.0 - self.DAILY_LOSS_LIMIT_PCT)
+        ):
+            self._daily_loss_halted = True
+            self._save_daily_state()
+            self.logger.error(
+                f"DAILY LOSS LIMIT HIT: equity {equity:,.0f} JPY is down {self.DAILY_LOSS_LIMIT_PCT * 100:.0f}%+ from "
+                f"today's start {self._day_start_equity_jpy:,.0f} JPY. No new entries until the next JST day."
+            )
 
         current_open_pairs = {
             pos.get("pair") for pos in review_res.open_positions if pos.get("pair")
@@ -210,11 +269,11 @@ class TradingOrchestrator:
                 )
                 if self._consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
                     self._circuit_breaker_until = max(
-                        self._circuit_breaker_until, now_ts + self.CIRCUIT_BREAKER_PAUSE_SEC
+                        self._circuit_breaker_until, now_ts + self.CONSECUTIVE_LOSS_PAUSE_SEC
                     )
                     self.logger.error(
                         f"CIRCUIT BREAKER TRIPPED: {self._consecutive_losses} consecutive losses. "
-                        f"Pausing new entries for {self.CIRCUIT_BREAKER_PAUSE_SEC / 60:.0f} minutes."
+                        f"Pausing new entries for {self.CONSECUTIVE_LOSS_PAUSE_SEC / 60:.0f} minutes."
                     )
             else:
                 self._consecutive_losses = 0
@@ -417,15 +476,18 @@ class TradingOrchestrator:
                 and est_net_pnl >= self.force_profit_close_jpy
             )
 
-            # Check take-profit exit condition (+0.90% target for high-win-rate multi-trade compounding, backtest-verified)
+            # Check take-profit exit condition (targets come from the strategist's backtested exit geometry)
             tp_hit = force_tp_hit
             is_emergency_close = False
             if not tp_hit and side == "short" and avg_px > 0:
-                target_px = avg_px * 0.991  # +0.90% take-profit target (~75% WR multi-trade compounding)
+                target_px = avg_px * (1.0 - self.directional_strategist.SHORT_TP_PCT)
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
             elif not tp_hit and side == "long" and avg_px > 0:
-                target_px = avg_px * (1.012 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs) else 1.009)
+                target_px = avg_px * (
+                    1.012 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs)
+                    else 1.0 + self.directional_strategist.LONG_TP_PCT
+                )
                 if last_px >= target_px and last_px > 0:
                     tp_hit = True
                 elif pair in SPOT_ONLY_PAIRS and last_px > 0 and last_px <= avg_px * 0.985:
@@ -572,7 +634,9 @@ class TradingOrchestrator:
         now_ts = self.last_tick_time
         self._recent_entry_timestamps = [t for t in self._recent_entry_timestamps if (now_ts - t) < 3600.0]
         churn_blocked = False
-        if now_ts < self._circuit_breaker_until:
+        if self._daily_loss_halted:
+            churn_blocked = True
+        elif now_ts < self._circuit_breaker_until:
             churn_blocked = True
         elif now_ts < self._global_cooldown_until:
             churn_blocked = True

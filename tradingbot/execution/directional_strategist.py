@@ -64,7 +64,16 @@ class DirectionalStrategist:
 
     MIN_CONVICTION: float = 0.60
 
-    def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = True):
+    # Exit geometry and short gate, from a 150-day replay of Bitbank 5m candles across the 5 margin pairs
+    # (2026-06-22..2026-11-18, real fees). The previous 0.85% stop / 0.90% target lost ~0.12% per trade in
+    # every quarter whatever the entry rule; only fading an overbought 15m rally inside a 4h downtrend with
+    # a wider stop and target stayed at or above break-even.
+    STOP_PCT: float = 0.012          # initial hard stop distance from entry
+    SHORT_TP_PCT: float = 0.018      # short take-profit distance (1.5R)
+    LONG_TP_PCT: float = 0.018       # margin-pair long take-profit distance (1.5R)
+    SHORT_FADE_RSI_MIN: float = 65.0  # shorts only into an overbought 15m rally, never chasing a drop
+
+    def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = False):
         self.client = bitbank_client
         self.allow_counter_trend_longs = allow_counter_trend_longs
         self.trend_analyst = MarketTrendAnalyst(bitbank_client)
@@ -234,8 +243,9 @@ class DirectionalStrategist:
                 reasons.append("Regular Bullish RSI Divergence confirmed (Price LL vs RSI HL)")
 
             # RSI Levels & Exhaustion Guard (avoid chasing oversold shorts / overbought longs)
-            if tech_result.rsi >= 65.0:
-                short_score += 0.05
+            if tech_result.rsi >= self.SHORT_FADE_RSI_MIN:
+                # Overbought rally inside a 4h downtrend is the one short setup that held up in backtest
+                short_score += 0.20 if align_4h == TrendAlignment.BEARISH.value else 0.05
                 long_score -= 0.10
                 reasons.append(f"RSI overbought ({tech_result.rsi:.1f})")
             elif tech_result.rsi <= 35.0:
@@ -296,10 +306,26 @@ class DirectionalStrategist:
         short_conviction = min(1.0, max(0.0, round(short_score, 2)))
         long_conviction = min(1.0, max(0.0, round(long_score, 2))) if long_eligible else 0.0
 
+        # Hard short gates (backtest): never short a 4h uptrend, and only sell an overbought rally
+        short_allowed = True
+        if align_4h == TrendAlignment.BULLISH.value:
+            short_allowed = False
+            reasons.append("Short gated: 4h trend is BULLISH")
+        elif tech_result is not None and tech_result.rsi < self.SHORT_FADE_RSI_MIN:
+            short_allowed = False
+            reasons.append(
+                f"Short gated: RSI {tech_result.rsi:.1f} < {self.SHORT_FADE_RSI_MIN:.0f}, waiting for an overbought rally to sell"
+            )
+
         # =====================================================================
         # Signal Action & Target Pricing
         # =====================================================================
-        if pair in MARGIN_PAIRS and short_conviction >= self.MIN_CONVICTION and short_conviction >= long_conviction:
+        if (
+            pair in MARGIN_PAIRS
+            and short_allowed
+            and short_conviction >= self.MIN_CONVICTION
+            and short_conviction >= long_conviction
+        ):
             action = "SHORT"
             position_type = "margin"
             conviction = short_conviction
@@ -314,18 +340,11 @@ class DirectionalStrategist:
             else:
                 entry_px = max(best_ask, last_px) * 1.0020  # Wait for +0.20% maker pullback instead of chasing bottom
 
-            # Hard Stop Loss: above resistance wall or 0.85% above entry (capped at +0.85% max risk)
-            if res_wall and res_wall > entry_px:
-                stop_px = min(res_wall * 1.005, entry_px * 1.0085)
-            else:
-                stop_px = entry_px * 1.0085
+            # Hard Stop Loss: fixed STOP_PCT above entry (the backtested distance)
+            stop_px = entry_px * (1.0 + self.STOP_PCT)
 
-            # Take Profit: support wall or 2:1 risk reward
-            risk_dist = stop_px - entry_px
-            if sup_wall and sup_wall < entry_px:
-                tp_px = sup_wall
-            else:
-                tp_px = entry_px - (2.0 * risk_dist)
+            # Take Profit: fixed SHORT_TP_PCT below entry (matches the orchestrator's live exit)
+            tp_px = entry_px * (1.0 - self.SHORT_TP_PCT)
 
         elif long_conviction >= self.MIN_CONVICTION and long_eligible:
             action = "LONG"
@@ -342,18 +361,11 @@ class DirectionalStrategist:
             else:
                 entry_px = min(best_bid, last_px) * 0.9980  # Wait for -0.20% maker dip instead of chasing top
 
-            # Hard Stop Loss: below support wall or 0.85% below entry (capped at -0.85% max risk)
-            if sup_wall and sup_wall < entry_px:
-                stop_px = max(sup_wall * 0.995, entry_px * 0.9915)
-            else:
-                stop_px = entry_px * 0.9915
+            # Hard Stop Loss: fixed STOP_PCT below entry
+            stop_px = entry_px * (1.0 - self.STOP_PCT)
 
-            # Take Profit: resistance wall or 2:1 risk reward
-            risk_dist = entry_px - stop_px
-            if res_wall and res_wall > entry_px:
-                tp_px = res_wall
-            else:
-                tp_px = entry_px + (2.0 * risk_dist)
+            # Take Profit: fixed LONG_TP_PCT above entry (matches the orchestrator's live exit)
+            tp_px = entry_px * (1.0 + self.LONG_TP_PCT)
 
         else:
             action = "NEUTRAL"

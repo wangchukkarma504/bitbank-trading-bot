@@ -204,7 +204,9 @@ class RiskManager:
     and multi-tier trailing ratchets.
     """
 
-    SHORT_LEVERAGE_FACTOR: float = 1.95  # ~100% of 2.0x max margin buying power (2.5% safety buffer for rounding/fees)
+    SHORT_LEVERAGE_FACTOR: float = 1.60  # Leverage ceiling: 80% of Bitbank's 2.0x margin buying power
+    MAX_RISK_PCT_PER_TRADE: float = 0.02  # A stop-out (incl. taker fee + slippage) may cost at most 2% of equity
+    STOP_EXIT_COST_PCT: float = 0.0015    # 0.12% taker stop fee + ~0.03% slippage
     SPOT_LONG_ALLOC_CAP: float = 0.50    # Max 50% equity allocation
     SPOT_LONG_DEFAULT_ALLOC: float = 0.30
 
@@ -239,11 +241,16 @@ class RiskManager:
                 raise ValueError(f"Pair {pair} is not in supported pairs whitelist")
 
         if side == "sell" or position_type == "margin":
+            # Size from the stop distance so one stop-out costs at most MAX_RISK_PCT_PER_TRADE of equity
+            leverage = self.SHORT_LEVERAGE_FACTOR
+            if entry_price > 0 and stop_loss_price > 0:
+                stop_dist = abs(stop_loss_price - entry_price) / entry_price
+                leverage = min(leverage, self.MAX_RISK_PCT_PER_TRADE / (stop_dist + self.STOP_EXIT_COST_PCT))
             qty, qty_str, notional = calculate_margin_short_size(
                 equity_jpy=equity_jpy,
                 pair=pair,
                 entry_price=entry_price,
-                leverage_factor=self.SHORT_LEVERAGE_FACTOR,
+                leverage_factor=leverage,
             )
         else:
             cash = free_cash_jpy if free_cash_jpy is not None else equity_jpy
@@ -354,14 +361,22 @@ class RiskManager:
         current_price: float,
         client=None,
         active_stops: Optional[List[Dict[str, Any]]] = None,
-        be_trigger_pct: float = 0.0048,   # +0.48% unrealized profit triggers fee-covered break-even (backtest-verified)
-        lock_trigger_pct: float = 0.0080,  # +0.80% unrealized profit triggers early profit lock
-        lock_profit_pct: float = 0.0040,   # Locks in +0.40% profit
+        be_trigger_pct: Optional[float] = None,    # Early break-even ratchet: off by default (see note below)
+        lock_trigger_pct: Optional[float] = None,  # Early profit-lock ratchet: off by default
+        lock_profit_pct: float = 0.0040,           # Profit locked when lock_trigger_pct is set
     ) -> Optional[Dict[str, Any]]:
         """Evaluate unrealized PnL and ratchet the protective stop closer to protect capital.
         Uses place-before-cancel sync_stop to maintain continuous exchange protection.
         Prevents order churn by rounding target stop levels and requiring strictly improved price levels.
+
+        The early ratchets (+0.48% -> lock +0.25%, +0.80% -> lock +0.40%) are disabled by default: in the
+        150-day replay they stopped winners out on normal pullbacks and cut the average trade by a third or
+        more. Only the >= +1.6% trailing lock stays on. Pass the trigger values explicitly to re-enable them.
         """
+        if be_trigger_pct is None:
+            be_trigger_pct = float("inf")
+        if lock_trigger_pct is None:
+            lock_trigger_pct = float("inf")
         active_client = client or self.client
         side = position.get("position_side", "short")
         pos_type = position.get("position_type", "margin")

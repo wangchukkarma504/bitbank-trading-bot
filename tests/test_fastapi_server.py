@@ -330,10 +330,10 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(r_off.status_code, 200)
         self.assertIsNone(controller.orchestrator.force_profit_close_jpy)
 
-        # Altcoin breakout scalps are automatically enabled by default
-        self.assertTrue(controller.orchestrator.allow_counter_trend_longs)
-        self.assertTrue(controller.orchestrator.directional_strategist.allow_counter_trend_longs)
-        self.assertTrue(client.get("/api/status").json()["allow_counter_trend_longs"])
+        # Counter-trend longs are off by default (they lost in the 150-day replay); /api/config can enable them
+        self.assertFalse(controller.orchestrator.allow_counter_trend_longs)
+        self.assertFalse(controller.orchestrator.directional_strategist.allow_counter_trend_longs)
+        self.assertFalse(client.get("/api/status").json()["allow_counter_trend_longs"])
 
     def test_japan_tax_report_profile_and_csv(self):
         client, _, mock_bb = self._make_client()

@@ -196,7 +196,7 @@ def render_ascii_dashboard(
         "║               📈 BITBANK CRYPTO BOT: EASY DASHBOARD                      ║",
         "╚══════════════════════════════════════════════════════════════════════════╝",
         f" 💰 Starting Budget       : ¥{starting_budget:,.0f} (${budget_usd:.2f} USDT)",
-        f" ⚡ 2.0x Buying Power     : ¥{buying_power:,.0f} (${buying_power_usd:.2f} USDT) [1.95x Max Short]",
+        f" ⚡ 2.0x Buying Power     : ¥{buying_power:,.0f} (${buying_power_usd:.2f} USDT) [1.60x Max Short]",
         f" 🏦 Current Total Value   : ¥{total_equity:,.1f} (${equity_usd:.2f} USDT)",
         f" 📊 Total Profit / Loss   : {sign}¥{total_pnl:,.1f} ({sign}${pnl_usd:.2f} | {sign}{total_pnl_pct:.2f}%)",
         f" 📈 In-Trade Unrealized   : {in_sign}¥{in_trade_pnl:,.1f} ({in_sign}${in_trade_usd:.2f} | {in_sign}{in_trade_pct:.2f}%)",

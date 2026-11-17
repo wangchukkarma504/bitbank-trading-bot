@@ -471,6 +471,8 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
             position=pos,
             current_price=13660.0,
             client=self.client,
+            be_trigger_pct=0.0048,
+            lock_trigger_pct=0.0080,
         )
         self.assertIsNotNone(res1)
         oid1 = res1["order_id"]
@@ -491,6 +493,8 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
             current_price=13655.0,
             client=self.client,
             active_stops=active_stops,
+            be_trigger_pct=0.0048,
+            lock_trigger_pct=0.0080,
         )
         # MUST BE NONE - no order replacement or churning!
         self.assertIsNone(res2)
@@ -525,12 +529,19 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
         )
         self.assertIsNone(res_noise)
 
-        # Case 2: +0.55% (9,945) -> Fee-covered BE ratchet: 10000 * 0.9975 = 9,975.0 (+0.25% locked)
+        # Early ratchets are off by default: +0.90% leaves the initial stop untouched
+        self.assertIsNone(rm.evaluate_and_apply_ratchets(
+            pair="sol_jpy", position=pos, current_price=9910.0, client=self.client,
+        ))
+
+        # Case 2 (early ratchets explicitly enabled): +0.55% (9,945) -> Fee-covered BE ratchet: 10000 * 0.9975 = 9,975.0 (+0.25% locked)
         res_be = rm.evaluate_and_apply_ratchets(
             pair="sol_jpy",
             position=pos,
             current_price=9945.0,
             client=self.client,
+            be_trigger_pct=0.0048,
+            lock_trigger_pct=0.0080,
         )
         self.assertIsNotNone(res_be)
         mgr = rm.get_sync_manager("sol_jpy", self.client)
@@ -542,6 +553,8 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
             position=pos,
             current_price=9910.0,
             client=self.client,
+            be_trigger_pct=0.0048,
+            lock_trigger_pct=0.0080,
         )
         self.assertIsNotNone(res_early)
         self.assertAlmostEqual(mgr.current_stop_level, 9960.0, places=1)
