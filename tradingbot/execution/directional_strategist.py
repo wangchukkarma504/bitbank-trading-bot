@@ -173,14 +173,22 @@ class DirectionalStrategist:
             and (trend_1h is None or last_px > trend_1h.ema20)
             and (tech_result is None or tech_result.rsi < 68.0)
         )
-        long_eligible = btc_regime_bullish or alt_breakout_ok
+        margin_bounce_ok = (
+            self.allow_counter_trend_longs
+            and pair in MARGIN_PAIRS
+            and align_15m == TrendAlignment.BULLISH.value
+            and align_1h == TrendAlignment.BULLISH.value
+            and (trend_1h is None or last_px > trend_1h.ema20)
+            and (tech_result is None or tech_result.rsi < 65.0)
+        )
+        long_eligible = btc_regime_bullish or alt_breakout_ok or margin_bounce_ok
 
         if not btc_regime_bullish:
-            # Macro downtrend: award boost to Shorts; gate Longs unless altcoin breakout scalp qualifies
+            # Macro downtrend: award boost to Shorts; gate Longs unless breakout/bounce qualifies
             short_score += 0.15
-            if alt_breakout_ok:
+            if alt_breakout_ok or margin_bounce_ok:
                 long_score += 0.20
-                reasons.append("BTC bear regime, but altcoin 15m/1h breakout scalp qualified")
+                reasons.append("BTC bear regime, but 15m/1h bullish bounce scalp qualified")
             else:
                 reasons.append("BTC macro filter confirms BEAR REGIME (below 4h EMA200): Spot Longs gated")
                 long_score = 0.0  # HARD GATE: Spot longs strictly suppressed
@@ -306,11 +314,11 @@ class DirectionalStrategist:
             else:
                 entry_px = max(best_ask, last_px) * 1.0020  # Wait for +0.20% maker pullback instead of chasing bottom
 
-            # Hard Stop Loss: above resistance wall or 1.2% above entry
+            # Hard Stop Loss: above resistance wall or 0.85% above entry (capped at +0.85% max risk)
             if res_wall and res_wall > entry_px:
-                stop_px = res_wall * 1.008
+                stop_px = min(res_wall * 1.005, entry_px * 1.0085)
             else:
-                stop_px = entry_px * 1.012
+                stop_px = entry_px * 1.0085
 
             # Take Profit: support wall or 2:1 risk reward
             risk_dist = stop_px - entry_px
@@ -334,11 +342,11 @@ class DirectionalStrategist:
             else:
                 entry_px = min(best_bid, last_px) * 0.9980  # Wait for -0.20% maker dip instead of chasing top
 
-            # Hard Stop Loss: below support wall or 1.2% below entry
+            # Hard Stop Loss: below support wall or 0.85% below entry (capped at -0.85% max risk)
             if sup_wall and sup_wall < entry_px:
-                stop_px = sup_wall * 0.992
+                stop_px = max(sup_wall * 0.995, entry_px * 0.9915)
             else:
-                stop_px = entry_px * 0.988
+                stop_px = entry_px * 0.9915
 
             # Take Profit: resistance wall or 2:1 risk reward
             risk_dist = entry_px - stop_px

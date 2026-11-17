@@ -419,6 +419,7 @@ class TradingOrchestrator:
 
             # Check take-profit exit condition (+0.90% target for high-win-rate multi-trade compounding, backtest-verified)
             tp_hit = force_tp_hit
+            is_emergency_close = False
             if not tp_hit and side == "short" and avg_px > 0:
                 target_px = avg_px * 0.991  # +0.90% take-profit target (~75% WR multi-trade compounding)
                 if last_px <= target_px and last_px > 0:
@@ -431,6 +432,21 @@ class TradingOrchestrator:
                     # In-process -1.5% hard stop for spot-only pairs that lack native Bitbank stop orders
                     self.logger.warning(f"[SPOT STOP] {pair} hit -1.5% stop ({last_px} <= {avg_px * 0.985:.4f}); closing.")
                     tp_hit = True
+                    is_emergency_close = True
+
+            # Automated early-cut if position is underwater >= -0.55% AND orderbook depth flipped heavily against it
+            if not tp_hit and avg_px > 0 and last_px > 0:
+                gain_pct = ((avg_px - last_px) / avg_px) if side == "short" else ((last_px - avg_px) / avg_px)
+                sig = self.last_signals.get(pair)
+                depth_ratio = float(getattr(sig, "depth_ratio", 1.0) or 1.0) if sig else 1.0
+                if gain_pct <= -0.0055 and (
+                    (side == "short" and depth_ratio >= 1.80) or (side == "long" and depth_ratio <= 0.55)
+                ):
+                    self.logger.warning(
+                        f"[EARLY THESIS CUT] {pair} {side} at {gain_pct*100:.2f}% with opposing depth_ratio={depth_ratio:.2f}; closing early."
+                    )
+                    tp_hit = True
+                    is_emergency_close = True
 
             if tp_hit:
                 if force_tp_hit:
@@ -441,37 +457,58 @@ class TradingOrchestrator:
                 else:
                     self.logger.info(f"Target take-profit reached for {pair} {side} at {last_px:,.1f} JPY!")
                 if not self.dry_run:
-                    # Cancel all existing active orders/stops on pair first so nothing remains locked
                     mgr = self.risk_manager.get_sync_manager(pair, self.client)
-                    cancelled_ids = set()
-                    if mgr.current_stop_id:
-                        try:
-                            self.client.cancel(pair, mgr.current_stop_id)
-                            cancelled_ids.add(mgr.current_stop_id)
-                        except Exception:
-                            pass
-                    for o in (list(review_res.active_stops) + list(review_res.active_orders)):
-                        oid = o.get("order_id")
-                        if o.get("pair") == pair and oid is not None and oid not in cancelled_ids:
-                            try:
-                                self.client.cancel(pair, oid)
-                                cancelled_ids.add(oid)
-                            except Exception:
-                                pass
-                    # Cover position at market to bank profit / execute stop
                     cover_side = "buy" if side == "short" else "sell"
                     pos_side_arg = side if (pair in MARGIN_PAIRS and side in ("short", "long") and pos.get("position_type", "margin") != "spot") else None
-                    try:
-                        if pos_side_arg:
-                            self.client.order(pair, side=cover_side, amount=amt_str, type_="market", position_side=pos_side_arg)
-                        else:
-                            self.client.order(pair, side=cover_side, amount=amt_str, type_="market")
+                    # Try post-only maker limit close on normal TPs to earn -0.02% rebate instead of paying 0.12% taker fee
+                    maker_tp_filled = False
+                    maker_tp_resting = False
+                    if not is_emergency_close and not force_tp_hit and last_px > 0:
+                        cfg_p = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair)
+                        pd_p = cfg_p.price_digits if cfg_p else 1
+                        tp_px_str = f"{last_px:.{pd_p}f}" if pd_p > 0 else str(int(round(last_px)))
+                        try:
+                            tp_kwargs = {"side": cover_side, "amount": amt_str, "price": tp_px_str, "type_": "limit", "post_only": True}
+                            if pos_side_arg:
+                                tp_kwargs["position_side"] = pos_side_arg
+                            tp_res = self.client.order(pair, **tp_kwargs)
+                            if tp_res.get("status") == "FULLY_FILLED":
+                                maker_tp_filled = True
+                            elif tp_res.get("order_id") is not None:
+                                maker_tp_resting = True
+                        except Exception:
+                            pass
+
+                    if not maker_tp_resting:
+                        # Cancel all existing active orders/stops on pair so nothing remains locked
+                        cancelled_ids = set()
+                        if mgr.current_stop_id:
+                            try:
+                                self.client.cancel(pair, mgr.current_stop_id)
+                                cancelled_ids.add(mgr.current_stop_id)
+                            except Exception:
+                                pass
+                        for o in (list(review_res.active_stops) + list(review_res.active_orders)):
+                            oid = o.get("order_id")
+                            if o.get("pair") == pair and oid is not None and oid not in cancelled_ids:
+                                try:
+                                    self.client.cancel(pair, oid)
+                                    cancelled_ids.add(oid)
+                                except Exception:
+                                    pass
+                        if not maker_tp_filled:
+                            # Fallback to market close if post-only didn't fill/rest
+                            try:
+                                if pos_side_arg:
+                                    self.client.order(pair, side=cover_side, amount=amt_str, type_="market", position_side=pos_side_arg)
+                                else:
+                                    self.client.order(pair, side=cover_side, amount=amt_str, type_="market")
+                            except Exception as e:
+                                self.logger.error(f"Take-profit close failed on {pair}: {e}")
                         mgr.current_stop_id = None
                         mgr.current_stop_level = None
                         mgr.current_stop_qty = None
                         self.position_reviewer.spot_entry_prices.pop(pair, None)
-                    except Exception as e:
-                        self.logger.error(f"Take-profit close failed on {pair}: {e}")
                 else:
                     self.logger.info(f"[DRY-RUN] Take-Profit execution simulated for {pair}")
 
