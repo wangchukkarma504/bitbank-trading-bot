@@ -231,10 +231,19 @@ class DirectionalStrategist:
                 long_score -= 0.10
                 reasons.append(f"RSI overbought ({tech_result.rsi:.1f})")
             elif tech_result.rsi <= 35.0:
-                short_score -= 0.15
+                short_score -= 0.25
                 reasons.append(f"RSI oversold ({tech_result.rsi:.1f}): short-chase penalty")
                 if long_eligible:
                     long_score += 0.05
+
+            if trend_15m and trend_15m.ema20 > 0 and last_px > 0:
+                ema_dist = (last_px - trend_15m.ema20) / trend_15m.ema20
+                if ema_dist < -0.012:
+                    short_score -= 0.15
+                    reasons.append(f"Stretched {ema_dist * 100:.1f}% below 15m EMA20: wait for bounce")
+                elif ema_dist > 0.012 and long_eligible:
+                    long_score -= 0.15
+                    reasons.append(f"Stretched +{ema_dist * 100:.1f}% above 15m EMA20: wait for dip")
 
             if rsi_div == RsiDivergence.BULLISH_DIV.value:
                 short_score -= 0.10
@@ -287,13 +296,15 @@ class DirectionalStrategist:
             position_type = "margin"
             conviction = short_conviction
 
-            # Entry targeting: Maker limit order at/above best ask or rejection midpoint
-            if wick_result and wick_result.recommended_entry and wick_result.recommended_entry >= best_ask:
+            # Entry targeting: Maker limit at rejection wick, meaningful resistance wall (>=+0.15%), 15m EMA20 pullback, or +0.20%
+            if wick_result and wick_result.recommended_entry and wick_result.recommended_entry >= best_ask * 1.001:
                 entry_px = wick_result.recommended_entry
-            elif res_wall and res_wall >= best_ask:
+            elif res_wall and res_wall >= best_ask * 1.0015:
                 entry_px = res_wall
+            elif trend_15m and trend_15m.ema20 > max(best_ask, last_px) and (trend_15m.ema20 - last_px) / max(1e-9, last_px) <= 0.008:
+                entry_px = trend_15m.ema20
             else:
-                entry_px = max(best_ask, last_px) * 1.001  # Wait for +0.10% maker pullback instead of chasing
+                entry_px = max(best_ask, last_px) * 1.0020  # Wait for +0.20% maker pullback instead of chasing bottom
 
             # Hard Stop Loss: above resistance wall or 1.2% above entry
             if res_wall and res_wall > entry_px:
@@ -313,13 +324,15 @@ class DirectionalStrategist:
             position_type = "spot"
             conviction = long_conviction
 
-            # Entry targeting: Maker limit order at/below best bid or absorption midpoint
-            if wick_result and wick_result.recommended_entry and wick_result.recommended_entry <= best_bid:
+            # Entry targeting: Maker limit at absorption wick, meaningful support wall (<=-0.15%), 15m EMA20 pullback, or -0.20%
+            if wick_result and wick_result.recommended_entry and wick_result.recommended_entry <= best_bid * 0.999:
                 entry_px = wick_result.recommended_entry
-            elif sup_wall and sup_wall <= best_bid:
+            elif sup_wall and sup_wall <= best_bid * 0.9985:
                 entry_px = sup_wall
+            elif trend_15m and 0 < trend_15m.ema20 < min(best_bid, last_px) and (last_px - trend_15m.ema20) / max(1e-9, last_px) <= 0.008:
+                entry_px = trend_15m.ema20
             else:
-                entry_px = min(best_bid, last_px) * 0.999  # Wait for -0.10% maker dip instead of chasing
+                entry_px = min(best_bid, last_px) * 0.9980  # Wait for -0.20% maker dip instead of chasing top
 
             # Hard Stop Loss: below support wall or 1.2% below entry
             if sup_wall and sup_wall < entry_px:

@@ -78,8 +78,8 @@ class TradingOrchestrator:
     INTER_PAIR_SLEEP_SEC: float = 0.20
 
     # Anti-churn & capital preservation circuit breakers
-    POST_CLOSE_COOLDOWN_SEC: float = 180.0      # 3 min global cooldown after any position closes
-    SAME_PAIR_POST_CLOSE_SEC: float = 900.0     # 15 min cooldown on same pair after any close (stop whipsaw/churn)
+    POST_CLOSE_COOLDOWN_SEC: float = 120.0      # 2 min global cooldown after any position closes
+    SAME_PAIR_POST_CLOSE_SEC: float = 300.0     # 5 min same-pair cooldown after a win (allows active multi-trade rotation)
     LOSS_PAIR_COOLDOWN_SEC: float = 900.0       # 15 min same-pair cooldown after a losing close
     MAX_ENTRIES_PER_HOUR: int = 5               # Max 5 new entries per rolling 60-min window
     MAX_CONSECUTIVE_LOSSES: int = 2             # 2 consecutive losses trigger circuit breaker
@@ -416,14 +416,14 @@ class TradingOrchestrator:
                 and est_net_pnl >= self.force_profit_close_jpy
             )
 
-            # Check extended take-profit blow-off exit condition (+2.8% target for short/long, backtest-verified)
+            # Check take-profit exit condition (+0.90% target for high-win-rate multi-trade compounding, backtest-verified)
             tp_hit = force_tp_hit
             if not tp_hit and side == "short" and avg_px > 0:
-                target_px = avg_px * 0.972  # +2.8% take profit blow-off target (~¥5,400 net profit)
+                target_px = avg_px * 0.991  # +0.90% take-profit target (~75% WR multi-trade compounding)
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
             elif not tp_hit and side == "long" and avg_px > 0:
-                target_px = avg_px * (1.030 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs) else 1.028)
+                target_px = avg_px * (1.012 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs) else 1.009)
                 if last_px >= target_px and last_px > 0:
                     tp_hit = True
                 elif pair in SPOT_ONLY_PAIRS and last_px > 0 and last_px <= avg_px * 0.985:

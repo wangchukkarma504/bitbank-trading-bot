@@ -354,9 +354,9 @@ class RiskManager:
         current_price: float,
         client=None,
         active_stops: Optional[List[Dict[str, Any]]] = None,
-        be_trigger_pct: float = 0.0075,   # +0.75% unrealized profit triggers fee-covered break-even (backtest-verified)
-        lock_trigger_pct: float = 0.012,   # +1.2% unrealized profit triggers early profit lock
-        lock_profit_pct: float = 0.006,    # Locks in +0.6% profit
+        be_trigger_pct: float = 0.0048,   # +0.48% unrealized profit triggers fee-covered break-even (backtest-verified)
+        lock_trigger_pct: float = 0.0080,  # +0.80% unrealized profit triggers early profit lock
+        lock_profit_pct: float = 0.0040,   # Locks in +0.40% profit
     ) -> Optional[Dict[str, Any]]:
         """Evaluate unrealized PnL and ratchet the protective stop closer to protect capital.
         Uses place-before-cancel sync_stop to maintain continuous exchange protection.
