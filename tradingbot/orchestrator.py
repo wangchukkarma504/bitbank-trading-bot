@@ -173,6 +173,8 @@ class TradingOrchestrator:
         self.equity_floor_jpy: Optional[float] = equity_floor_jpy
         self.equity_floor_hit: bool = False
         self.frequent_mode: bool = False
+        self._leverage_override: Optional[float] = None
+        self._max_risk_override: Optional[float] = None
         self._selective_limits = (
             self.risk_manager.MAX_RISK_PCT_PER_TRADE, self.MAX_CONSECUTIVE_LOSSES, self.CONSECUTIVE_LOSS_PAUSE_SEC
         )
@@ -260,6 +262,20 @@ class TradingOrchestrator:
         self.risk_manager.MAX_RISK_PCT_PER_TRADE = risk
         self.MAX_CONSECUTIVE_LOSSES = max_losses
         self.CONSECUTIVE_LOSS_PAUSE_SEC = pause
+        self._apply_sizing_overrides()
+
+    def set_sizing_overrides(self, leverage: Optional[float] = None, max_risk_pct: Optional[float] = None) -> None:
+        """Operator overrides for position size: leverage (capped at the exchange maximum) and the per-trade
+        risk cap. None keeps the mode's default. A risk cap of 1.0 or more disables the cap (full leverage)."""
+        self._leverage_override = leverage if leverage and leverage > 0 else None
+        self._max_risk_override = max_risk_pct if max_risk_pct and max_risk_pct > 0 else None
+        self.set_frequent_mode(self.frequent_mode)
+
+    def _apply_sizing_overrides(self) -> None:
+        rm = self.risk_manager
+        rm.SHORT_LEVERAGE_FACTOR = min(rm.MAX_EXCHANGE_LEVERAGE, self._leverage_override or type(rm).SHORT_LEVERAGE_FACTOR)
+        if self._max_risk_override:
+            rm.MAX_RISK_PCT_PER_TRADE = self._max_risk_override
 
     @staticmethod
     def _plan_pct(sig: Optional[DirectionalSignal], field: str) -> Optional[float]:

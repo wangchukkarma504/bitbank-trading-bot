@@ -142,6 +142,21 @@ class TestModeSwitchAndFloor(unittest.TestCase):
         self.assertAlmostEqual(orch.risk_manager.MAX_RISK_PCT_PER_TRADE, 0.020)
         self.assertEqual(orch.MAX_CONSECUTIVE_LOSSES, 2)
 
+    def test_operator_leverage_override_uses_the_full_exchange_limit(self):
+        orch = self._orch(frequent_mode=True)
+        orch.set_sizing_overrides(leverage=2.0, max_risk_pct=1.0)
+        rm = orch.risk_manager
+        self.assertAlmostEqual(rm.SHORT_LEVERAGE_FACTOR, 1.95)  # 2.0x requested, capped at what the exchange fits
+        plan = rm.create_sizing_plan(equity_jpy=19000.0, pair="eth_jpy", side="sell", entry_price=290000.0,
+                                     stop_loss_price=290000.0 * 1.012, take_profit_price=281300.0)
+        self.assertGreater(plan.allocation_notional_jpy, 19000.0 * 1.90)
+        self.assertLessEqual(plan.allocation_notional_jpy, 19000.0 * 1.95)
+        orch.set_frequent_mode(False)  # the override survives a mode switch
+        self.assertAlmostEqual(rm.SHORT_LEVERAGE_FACTOR, 1.95)
+        orch.set_sizing_overrides()    # and can be cleared
+        self.assertAlmostEqual(rm.SHORT_LEVERAGE_FACTOR, 1.60)
+        self.assertAlmostEqual(rm.MAX_RISK_PCT_PER_TRADE, 0.020)
+
     def test_equity_floor_blocks_new_entries(self):
         orch = self._orch(frequent_mode=True, equity_floor_jpy=15000.0)
         orch.position_reviewer.review = MagicMock(return_value=_review(14990.0))

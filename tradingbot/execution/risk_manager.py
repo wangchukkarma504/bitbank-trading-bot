@@ -207,6 +207,8 @@ class RiskManager:
     SHORT_LEVERAGE_FACTOR: float = 1.60  # Leverage ceiling: 80% of Bitbank's 2.0x margin buying power
     MAX_RISK_PCT_PER_TRADE: float = 0.02  # A stop-out (incl. taker fee + slippage) may cost at most 2% of equity
     STOP_EXIT_COST_PCT: float = 0.0015    # 0.12% taker stop fee + ~0.03% slippage
+    # Bitbank allows 2.0x; 1.95x is the most that fits once fees and amount rounding are counted
+    MAX_EXCHANGE_LEVERAGE: float = 1.95
     SPOT_LONG_ALLOC_CAP: float = 0.50    # Max 50% equity allocation
     SPOT_LONG_DEFAULT_ALLOC: float = 0.30
 

@@ -190,6 +190,9 @@ class BotController:
                 self.orchestrator.directional_strategist.allow_counter_trend_longs = val
             if cfg.get("frequent_mode") is not None:
                 self.orchestrator.set_frequent_mode(bool(cfg["frequent_mode"]))
+            self.orchestrator.set_sizing_overrides(
+                leverage=cfg.get("leverage_factor"), max_risk_pct=cfg.get("max_risk_pct_per_trade")
+            )
             floor = cfg.get("equity_floor_jpy")
             self.orchestrator.equity_floor_jpy = float(floor) if floor is not None and float(floor) > 0 else None
         except Exception as e:
@@ -210,6 +213,8 @@ class BotController:
                         "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
                         "frequent_mode": self.orchestrator.frequent_mode,
                         "equity_floor_jpy": self.orchestrator.equity_floor_jpy,
+                        "leverage_factor": self.orchestrator._leverage_override,
+                        "max_risk_pct_per_trade": self.orchestrator._max_risk_override,
                     },
                     f,
                     indent=2,
@@ -923,6 +928,8 @@ class BotController:
             "frequent_mode": bool(getattr(orch, "frequent_mode", False)),
             "equity_floor_jpy": getattr(orch, "equity_floor_jpy", None),
             "equity_floor_hit": bool(getattr(orch, "equity_floor_hit", False)),
+            "leverage_factor": orch.risk_manager.SHORT_LEVERAGE_FACTOR,
+            "max_risk_pct_per_trade": orch.risk_manager.MAX_RISK_PCT_PER_TRADE,
             "day_start_equity_jpy": round(float(getattr(orch, "_day_start_equity_jpy", 0.0) or 0.0), 2),
             "cooldown_sec": cd_rem,
             "lessons": list(reversed(lessons)),
