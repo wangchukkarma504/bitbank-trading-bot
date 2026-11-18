@@ -89,6 +89,9 @@ class DirectionalStrategist:
     FREQ_LONG_RSI_MAX: float = 40.0
     FREQ_CONVICTION: float = 0.95
     FREQ_TP_PCT: float = 0.030          # far target; the trailing stop does the exiting
+    # Entry rests this far beyond the market. The selective rule waits for a wall or a +0.20% pullback,
+    # which on 2026-11-18 left four sell orders 0.2%-1.0% above a market that then fell 1.5-2% unfilled.
+    FREQ_ENTRY_OFFSET_PCT: float = 0.0008
     # Initial stop "a bit beyond the rebound": past the last 2h swing extreme plus a buffer, clamped
     SWING_LOOKBACK_15M: int = 8
     SWING_BUFFER_PCT: float = 0.0015
@@ -405,6 +408,7 @@ class DirectionalStrategist:
             tp_px = entry_px * (1.0 - self.SHORT_TP_PCT)
 
             if self.frequent_mode and news is None:
+                entry_px = max(best_ask, last_px) * (1.0 + self.FREQ_ENTRY_OFFSET_PCT)
                 stop_px = self._swing_stop(entry_px, last_px, "short", candles_15m)
                 tp_px = entry_px * (1.0 - self.FREQ_TP_PCT)
 
@@ -436,6 +440,7 @@ class DirectionalStrategist:
             tp_px = entry_px * (1.0 + self.LONG_TP_PCT)
 
             if self.frequent_mode and news is None:
+                entry_px = min(best_bid, last_px) * (1.0 - self.FREQ_ENTRY_OFFSET_PCT)
                 stop_px = self._swing_stop(entry_px, last_px, "long", candles_15m)
                 tp_px = entry_px * (1.0 + self.FREQ_TP_PCT)
 

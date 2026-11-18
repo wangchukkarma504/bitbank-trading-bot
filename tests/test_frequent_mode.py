@@ -47,6 +47,8 @@ class TestFrequentEntries(unittest.TestCase):
         sig = _signal(True, 61.0, TrendAlignment.BEARISH.value)
         self.assertEqual(sig.action, "SHORT")
         self.assertGreaterEqual(sig.conviction, 0.95)
+        # The entry rests right beside the market (ask 290,010), not at a distant pullback level
+        self.assertAlmostEqual(sig.entry_price / 290010.0, 1.0008, places=4)
 
     def test_dip_long_in_a_4h_uptrend_only_in_frequent_mode(self):
         self.assertNotEqual(_signal(False, 38.0, TrendAlignment.BULLISH.value).action, "LONG")
