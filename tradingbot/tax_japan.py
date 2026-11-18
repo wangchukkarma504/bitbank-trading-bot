@@ -261,7 +261,10 @@ def build_tax_report(
             ym = dt_jst.strftime("%Y-%m")
 
             if pos_side:
-                trade_gross = float(t.get("profit_loss") or 0.0)
+                # Bitbank's profit_loss on a margin close is already net of the position's entry and exit fees.
+                # Adding this fill's fee back here and subtracting it below keeps gross - fees - interest equal
+                # to what the account actually gained or lost, instead of taking the fees off twice.
+                trade_gross = float(t.get("profit_loss") or 0.0) + fee_q
             else:
                 trade_gross = 0.0
                 if side == "buy":

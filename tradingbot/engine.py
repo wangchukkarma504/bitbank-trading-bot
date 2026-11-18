@@ -539,7 +539,9 @@ class Engine:
         logger.warning(f"CLOSED {pair}: {row['pnl_jpy']:+,.0f} JPY ({row['r']:+.2f}R) after {row['days']} days, {reason}")
 
     def _realized_pnl(self, pair: str, meta: Dict[str, Any]) -> Optional[float]:
-        """Net result of the trade from the exchange's own fill records (fees and interest included)."""
+        """Net result of the trade from the exchange's own fill records. Bitbank's profit_loss on a closing
+        fill is already net of the entry and exit fees (it equals the change in the account balance), so only
+        interest is taken off."""
         try:
             res = self.client._get("/user/spot/trade_history", {"pair": pair, "count": "200", "order": "desc"})
         except Exception:
@@ -548,9 +550,9 @@ class Engine:
         for t in res.get("trades", []) if isinstance(res, dict) else []:
             if t.get("position_side") != "long" or int(t.get("executed_at") or 0) < meta["entry_ts"] - 60_000:
                 continue
-            fee = float(t.get("fee_occurred_amount_quote") or t.get("fee_amount_quote") or 0.0)
-            total += float(t.get("profit_loss") or 0.0) - fee - float(t.get("interest") or 0.0)
-            closed = closed or t.get("side") == "sell"
+            if t.get("side") == "sell":
+                total += float(t.get("profit_loss") or 0.0) - float(t.get("interest") or 0.0)
+                closed = True
         return total if closed else None
 
     # ------------------------------------------------------------------ dashboard

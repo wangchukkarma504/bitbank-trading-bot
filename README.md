@@ -86,6 +86,7 @@ Runtime files (not committed): `bot_config.json` (settings), `bot_state.json` (t
 
 - `risk_per_trade_pct`: share of equity lost when a trade hits its initial stop (0 to 5). In the 2017 to 2026 replay, 1% gave about +14% a year with a 9% worst drawdown, 2% gave +28% with 17%, 3% gave +35% with 24%, and 5% gave +45% with 28%.
 - `equity_floor_jpy`: at or below this equity the bot opens nothing new.
+- `manual_stop_pct`: distance of the protective stop the bot gives a manual position that has none (default 1.2).
 - `capital_limit_jpy`: size positions as if equity were at most this.
 - `trading_enabled`, `emergency_stopped`: written by the dashboard's Pause, Resume and Emergency Stop buttons.
 

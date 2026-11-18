@@ -326,7 +326,7 @@ class TestFastAPIServer(unittest.TestCase):
                     "interest": "0",
                     "executed_at": ts_sell,
                 },
-                # Margin short close: Bitbank exact profit_loss = 120000, fee = -50 rebate, interest = 100
+                # Margin short close: profit_loss = 120000 (Bitbank's figure, already net of the fee), fee = -50, interest = 100
                 {
                     "trade_id": 3,
                     "order_id": 13,
@@ -350,11 +350,11 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(r_tax.status_code, 200)
         rep = r_tax.json()
         self.assertEqual(rep["data_source"], "bitbank_trade_history")
-        self.assertEqual(rep["gross_realized_pnl_jpy"], 170000.0)
+        self.assertEqual(rep["gross_realized_pnl_jpy"], 169950.0)   # 50,000 spot + (120,000 - 50) margin before fees
         self.assertEqual(rep["total_fees_jpy"], 120.0)
         self.assertEqual(rep["total_interest_jpy"], 100.0)
-        # Net profit = 170000 - 120 - 100 = 169780 (under 200k by itself)
-        self.assertEqual(rep["net_realized_profit_jpy"], 169780.0)
+        # Net = spot 50,000 - 170 fees, plus margin 120,000 (fee already inside) - 100 interest = 169,730
+        self.assertEqual(rep["net_realized_profit_jpy"], 169730.0)
         self.assertFalse(rep["tax_estimate"]["national_filing_required"])
         self.assertIn("No national 確定申告 needed", rep["tax_estimate"]["filing_advice"])
 
@@ -428,8 +428,8 @@ class TestFastAPIServer(unittest.TestCase):
         # Only the closing ETH short trade should be present, NOT the +39.48 opening maker rebate
         self.assertEqual(len(manual_rows), 1)
         self.assertEqual(manual_rows[0]["pair"], "eth_jpy")
-        # net_pnl = 4500 - (-30 rebate) - 20 = 4510
-        self.assertEqual(manual_rows[0]["pnl_jpy"], 4510.0)
+        # net = 4500 (already net of the fee) - 20 interest = 4480
+        self.assertEqual(manual_rows[0]["pnl_jpy"], 4480.0)
 
 
 if __name__ == "__main__":

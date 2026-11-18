@@ -175,6 +175,9 @@ class BotController:
 
             s.capital_limit_jpy = positive("capital_limit_jpy")
             s.equity_floor_jpy = positive("equity_floor_jpy")
+            manual_stop = positive("manual_stop_pct")
+            if manual_stop and manual_stop <= 25.0:
+                s.manual_stop_pct = manual_stop / 100.0
             if positive("baseline_jpy"):
                 s.baseline_jpy = positive("baseline_jpy")
             self.goal_target_jpy = positive("goal_target_jpy")
@@ -203,6 +206,7 @@ class BotController:
                         "capital_limit_jpy": s.capital_limit_jpy,
                         "goal_target_jpy": self.goal_target_jpy,
                         "equity_floor_jpy": s.equity_floor_jpy,
+                        "manual_stop_pct": round(s.manual_stop_pct * 100.0, 3),
                         "risk_per_trade_pct": round(self.engine.params.risk_per_trade * 100.0, 3),
                         "max_positions": self.engine.params.max_positions,
                         "trading_enabled": self.running,
@@ -351,7 +355,8 @@ class BotController:
                     or (pos_side == "long" and side == "sell")
                     or abs(raw_pnl) > 0.01
                 )
-                net_pnl = round(raw_pnl - fee_q - interest, 2) if (pos_side and is_close) else 0.0
+                # profit_loss on a closing margin fill is already net of the entry and exit fees
+                net_pnl = round(raw_pnl - interest, 2) if (pos_side and is_close) else 0.0
                 ts_ms = int(t.get("executed_at") or 0)
                 ts_sec = int(ts_ms / 1000) if ts_ms > 0 else int(time.time())
                 is_bot = any(bp == pair and abs(bts - ts_sec) <= 90 for bp, bts in bot_closes)
@@ -687,7 +692,7 @@ class BotController:
             gross_pnl = float(row.get("gross_pnl_jpy") or 0.0)
             if not row.get("is_close") and abs(gross_pnl) < 0.01:
                 continue
-            pnl = float(row.get("net_pnl_jpy") or 0.0)
+            pnl = gross_pnl - float(row.get("interest_jpy") or 0.0)   # recomputed: older rows took the fee off twice
             if abs(pnl) < 0.01:
                 continue
             ts_row = int(row.get("ts") or 0)

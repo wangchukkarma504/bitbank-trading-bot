@@ -203,6 +203,29 @@ class TestStops(unittest.TestCase):
         self.assertGreater(row["r"], -1.3)
         self.assertEqual(rig.live(), [])                     # nothing left on the book
 
+    def test_journal_takes_the_result_from_the_exchange_fill_records(self):
+        rig = Rig()
+        rig.open_long()
+        entry_ts = rig.engine.positions["eth_jpy"]["entry_ts"]
+        real_get = rig.mock._get
+
+        def with_history(path, params=None):
+            if path == "/user/spot/trade_history":
+                return {"trades": [
+                    {"pair": "eth_jpy", "side": "sell", "position_side": "long", "executed_at": entry_ts + 5000,
+                     "profit_loss": "-430.5", "fee_occurred_amount_quote": "7.5", "interest": "2.0"},
+                    {"pair": "eth_jpy", "side": "buy", "position_side": "long", "executed_at": entry_ts,
+                     "profit_loss": "0", "fee_occurred_amount_quote": "-1.3", "interest": "0"},
+                    {"pair": "eth_jpy", "side": "sell", "position_side": "long", "executed_at": entry_ts - 3_600_000,
+                     "profit_loss": "999", "fee_occurred_amount_quote": "1", "interest": "0"},     # an older trade
+                ]}
+            return real_get(path, params)
+        rig.mock._get = with_history
+        rig.mock.simulate_tick("eth_jpy", ETH * 0.93)
+        rig.tick()
+        # profit_loss already contains the fees: only the interest comes off, and nothing is counted twice
+        self.assertAlmostEqual(rig.engine.journal[-1]["pnl_jpy"], -432.5)
+
     def test_stop_is_resized_when_the_position_grows(self):
         rig = Rig()
         rig.open_long()
