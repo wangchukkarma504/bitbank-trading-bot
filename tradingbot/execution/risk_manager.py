@@ -364,6 +364,10 @@ class RiskManager:
         be_trigger_pct: Optional[float] = None,    # Early break-even ratchet: off by default (see note below)
         lock_trigger_pct: Optional[float] = None,  # Early profit-lock ratchet: off by default
         lock_profit_pct: float = 0.0040,           # Profit locked when lock_trigger_pct is set
+        trail_arm_pct: Optional[float] = None,     # Profit-lock trail: gain at which the stop moves to profit
+        trail_lock_pct: float = 0.0020,            # ...minimum gain locked once armed (covers the stop's fees)
+        trail_dist_pct: float = 0.0050,            # ...then the stop follows the price at this distance
+        min_step_pct: float = 0.0005,              # Smallest stop improvement worth a new order (avoids churn)
     ) -> Optional[Dict[str, Any]]:
         """Evaluate unrealized PnL and ratchet the protective stop closer to protect capital.
         Uses place-before-cancel sync_stop to maintain continuous exchange protection.
@@ -463,7 +467,15 @@ class RiskManager:
             elif gain_pct >= be_trigger_pct:
                 new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0025), pd))
 
-            if new_stop is not None and (current_stop is None or new_stop < current_stop - 1e-6):
+            # Profit-lock trail: once in profit past the fees, the stop sits on the profit side and only
+            # moves further into profit, so a winning trade cannot turn back into a loss.
+            if trail_arm_pct is not None and gain_pct >= trail_arm_pct:
+                locked = max(trail_lock_pct, gain_pct - trail_dist_pct)
+                trail_stop = max(min_safe_stop, round(avg_px * (1.0 - locked), pd))
+                new_stop = trail_stop if new_stop is None else min(new_stop, trail_stop)
+
+            step = max(1e-6, avg_px * min_step_pct) if trail_arm_pct is not None else 1e-6
+            if new_stop is not None and (current_stop is None or new_stop < current_stop - step):
                 return mgr.sync_stop(amt_str, new_stop, position_side=side)
 
         elif side == "long":
@@ -493,7 +505,13 @@ class RiskManager:
             elif gain_pct >= be_trigger_pct:
                 new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0025), pd))
 
-            if new_stop is not None and (current_stop is None or new_stop > current_stop + 1e-6):
+            if trail_arm_pct is not None and gain_pct >= trail_arm_pct:
+                locked = max(trail_lock_pct, gain_pct - trail_dist_pct)
+                trail_stop = min(max_safe_stop, round(avg_px * (1.0 + locked), pd))
+                new_stop = trail_stop if new_stop is None else max(new_stop, trail_stop)
+
+            step = max(1e-6, avg_px * min_step_pct) if trail_arm_pct is not None else 1e-6
+            if new_stop is not None and (current_stop is None or new_stop > current_stop + step):
                 return mgr.sync_stop(amt_str, new_stop, position_side=stop_pos_side)
 
         return None

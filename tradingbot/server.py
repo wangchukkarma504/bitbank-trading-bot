@@ -188,6 +188,10 @@ class BotController:
                 val = bool(cfg["allow_counter_trend_longs"])
                 self.orchestrator.allow_counter_trend_longs = val
                 self.orchestrator.directional_strategist.allow_counter_trend_longs = val
+            if cfg.get("frequent_mode") is not None:
+                self.orchestrator.set_frequent_mode(bool(cfg["frequent_mode"]))
+            floor = cfg.get("equity_floor_jpy")
+            self.orchestrator.equity_floor_jpy = float(floor) if floor is not None and float(floor) > 0 else None
         except Exception as e:
             logger.warning(f"Could not load bot config: {e}")
 
@@ -204,6 +208,8 @@ class BotController:
                         "allow_shorts": self.orchestrator.allow_shorts,
                         "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
                         "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
+                        "frequent_mode": self.orchestrator.frequent_mode,
+                        "equity_floor_jpy": self.orchestrator.equity_floor_jpy,
                     },
                     f,
                     indent=2,
@@ -914,6 +920,9 @@ class BotController:
             "circuit_breaker_sec": cb_rem,
             "daily_loss_halted": bool(getattr(orch, "_daily_loss_halted", False)),
             "news_override": getattr(orch, "news_override", None),
+            "frequent_mode": bool(getattr(orch, "frequent_mode", False)),
+            "equity_floor_jpy": getattr(orch, "equity_floor_jpy", None),
+            "equity_floor_hit": bool(getattr(orch, "equity_floor_hit", False)),
             "day_start_equity_jpy": round(float(getattr(orch, "_day_start_equity_jpy", 0.0) or 0.0), 2),
             "cooldown_sec": cd_rem,
             "lessons": list(reversed(lessons)),

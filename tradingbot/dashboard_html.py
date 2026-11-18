@@ -828,6 +828,8 @@ async function refresh() {
       (d.circuit_breaker_sec > 0 ? ` | CIRCUIT BREAKER: ${d.circuit_breaker_sec}s` : '') +
       (d.daily_loss_halted ? ' | DAILY LOSS LIMIT: no new entries until tomorrow (JST)' : '') +
       (d.news_override ? ` | NEWS OVERRIDE ${d.news_override.bias}: ${d.news_override.headline}` : '') +
+      (d.frequent_mode ? ' | FREQUENT MODE' : '') +
+      (d.equity_floor_hit ? ` | EQUITY FLOOR ¥${Math.round(d.equity_floor_jpy).toLocaleString('en-US')} HIT: no new entries` : '') +
       (d.cooldown_sec > 0 ? ` | Cooldown: ${d.cooldown_sec}s` : '');
 
     const apiBadge = document.getElementById('apiBadge');

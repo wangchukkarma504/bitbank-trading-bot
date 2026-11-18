@@ -89,6 +89,14 @@ class TradingOrchestrator:
     CIRCUIT_BREAKER_PAUSE_SEC: float = 1800.0   # 30 min pause when circuit breaker trips
     CONSECUTIVE_LOSS_PAUSE_SEC: float = 7200.0  # 2 h pause after consecutive losses (stop-outs cluster in rallies)
     DAILY_LOSS_LIMIT_PCT: float = 0.03          # No new entries for the rest of the JST day once equity is down 3%
+    # Frequent mode: profit-lock trailing stop (arm at +0.60%, lock +0.20%, then trail 0.50% behind price).
+    # Arming earlier (+0.35%) raised the win rate but lost more per trade in the replay, so it arms later.
+    FREQ_TRAIL_ARM_PCT: float = 0.0060
+    FREQ_TRAIL_LOCK_PCT: float = 0.0020
+    FREQ_TRAIL_DIST_PCT: float = 0.0050
+    FREQ_MAX_RISK_PCT: float = 0.010            # 1% of equity per stop-out (half the selective rule's 2%)
+    FREQ_MAX_CONSECUTIVE_LOSSES: int = 3
+    FREQ_CONSECUTIVE_LOSS_PAUSE_SEC: float = 3600.0
     TP_MAKER_WAIT_SEC: float = 60.0             # How long a resting maker take-profit may wait before a market close
 
     def __init__(
@@ -104,6 +112,8 @@ class TradingOrchestrator:
         allow_counter_trend_longs: bool = False,
         daily_state_path: Optional[str] = None,
         news_override_path: Optional[str] = None,
+        frequent_mode: bool = False,
+        equity_floor_jpy: Optional[float] = None,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
@@ -159,6 +169,14 @@ class TradingOrchestrator:
         self._last_exit_reason: Dict[str, str] = {}
         self._orphan_stop_seen: set = set()
         self._tp_limit_since: Dict[str, float] = {}
+        # Hard floor: at or below this equity the bot stops opening positions until the operator raises it
+        self.equity_floor_jpy: Optional[float] = equity_floor_jpy
+        self.equity_floor_hit: bool = False
+        self.frequent_mode: bool = False
+        self._selective_limits = (
+            self.risk_manager.MAX_RISK_PCT_PER_TRADE, self.MAX_CONSECUTIVE_LOSSES, self.CONSECUTIVE_LOSS_PAUSE_SEC
+        )
+        self.set_frequent_mode(frequent_mode)
         # Operator news override file: {"bias": "BEARISH"|"BULLISH", "set_at": epoch, "expires_at": epoch, "headline": str}
         self.news_override_path: Optional[str] = news_override_path
         self.news_override: Optional[Dict[str, Any]] = None
@@ -229,6 +247,19 @@ class TradingOrchestrator:
                 )
         except Exception as e:
             self.logger.warning(f"Failed to save daily risk state to {self.daily_state_path}: {e}")
+
+    def set_frequent_mode(self, enabled: bool) -> None:
+        """Switch between the selective rule (default, profitable in replay) and frequent mode (~4 trades/day)."""
+        self.frequent_mode = bool(enabled)
+        self.directional_strategist.frequent_mode = self.frequent_mode
+        risk, max_losses, pause = self._selective_limits
+        if self.frequent_mode:
+            risk, max_losses, pause = (
+                self.FREQ_MAX_RISK_PCT, self.FREQ_MAX_CONSECUTIVE_LOSSES, self.FREQ_CONSECUTIVE_LOSS_PAUSE_SEC
+            )
+        self.risk_manager.MAX_RISK_PCT_PER_TRADE = risk
+        self.MAX_CONSECUTIVE_LOSSES = max_losses
+        self.CONSECUTIVE_LOSS_PAUSE_SEC = pause
 
     @staticmethod
     def _plan_pct(sig: Optional[DirectionalSignal], field: str) -> Optional[float]:
@@ -763,6 +794,13 @@ class TradingOrchestrator:
                             self.logger.warning(f"Failed to cancel resting take-profit {o.get('order_id')} on {pair}: {e}")
                 self._tp_limit_since.pop(pair, None)
                 # Apply trailing ratchets (only the >= +1.6% trailing lock is active by default)
+                trail_kwargs: Dict[str, Any] = {}
+                if self.frequent_mode:
+                    trail_kwargs = {
+                        "trail_arm_pct": self.FREQ_TRAIL_ARM_PCT,
+                        "trail_lock_pct": self.FREQ_TRAIL_LOCK_PCT,
+                        "trail_dist_pct": self.FREQ_TRAIL_DIST_PCT,
+                    }
                 try:
                     self.risk_manager.evaluate_and_apply_ratchets(
                         pair=pair,
@@ -770,6 +808,7 @@ class TradingOrchestrator:
                         current_price=last_px,
                         client=self.client,
                         active_stops=review_res.active_stops,
+                        **trail_kwargs,
                     )
                 except Exception as e:
                     self.logger.warning(f"Trailing ratchet check failed on {pair}: {e}")
@@ -825,7 +864,18 @@ class TradingOrchestrator:
         now_ts = self.last_tick_time
         self._recent_entry_timestamps = [t for t in self._recent_entry_timestamps if (now_ts - t) < 3600.0]
         churn_blocked = False
-        if self._daily_loss_halted:
+        floor = self.equity_floor_jpy
+        floor_hit = bool(floor and floor > 0 and not review_query_failed and 0 < review_res.total_equity_jpy <= floor)
+        if floor_hit and not self.equity_floor_hit:
+            self.logger.error(
+                f"EQUITY FLOOR HIT: equity {review_res.total_equity_jpy:,.0f} JPY <= floor {floor:,.0f} JPY. "
+                f"No new entries until the floor is lowered or equity recovers."
+            )
+        if not review_query_failed:
+            self.equity_floor_hit = floor_hit
+        if self.equity_floor_hit:
+            churn_blocked = True
+        elif self._daily_loss_halted:
             churn_blocked = True
         elif now_ts < self._circuit_breaker_until:
             churn_blocked = True

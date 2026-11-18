@@ -82,13 +82,26 @@ class DirectionalStrategist:
     # News override (set by the operator's hourly news check, never by headlines alone): a confirmed
     # market-wide shock forces a trade in its direction with a wider stop. Position size shrinks with the
     # wider stop (risk-based sizing), so the worst case per trade stays the same. Not backtestable.
+    # Frequent mode (operator's choice, about 4 trades/day): short a 15m RSI >= 60 rally in a 4h downtrend,
+    # buy a 15m RSI <= 40 dip in a 4h uptrend. In the 147-day replay this LOST about 0.07% per trade; it is
+    # the least-bad rule set that reaches 3-5 trades a day. The selective default rule is the profitable one.
+    FREQ_SHORT_RSI_MIN: float = 60.0
+    FREQ_LONG_RSI_MAX: float = 40.0
+    FREQ_CONVICTION: float = 0.95
+    FREQ_TP_PCT: float = 0.030          # far target; the trailing stop does the exiting
+    # Initial stop "a bit beyond the rebound": past the last 2h swing extreme plus a buffer, clamped
+    SWING_LOOKBACK_15M: int = 8
+    SWING_BUFFER_PCT: float = 0.0015
+    SWING_MIN_STOP_PCT: float = 0.004
+
     NEWS_STOP_PCT: float = 0.020
     NEWS_TP_PCT: float = 0.030
     NEWS_CONVICTION_BOOST: float = 0.60
 
-    def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = False):
+    def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = False, frequent_mode: bool = False):
         self.client = bitbank_client
         self.allow_counter_trend_longs = allow_counter_trend_longs
+        self.frequent_mode = frequent_mode
         self.trend_analyst = MarketTrendAnalyst(bitbank_client)
         self.wick_analyst = WickAnatomyAnalyst(bitbank_client)
         self.tech_analyst = TechnicalDepthAnalyst(bitbank_client)
@@ -133,6 +146,7 @@ class DirectionalStrategist:
                 btc_regime_bullish = False
 
         # 2. Resolve Wick Anatomy (Role 4)
+        candles_15m = None
         if wick_result is None and active_client is not None:
             candles_15m = self.trend_analyst.fetch_candles(pair, "15min", days=3, client=active_client)
             wick_result = self.wick_analyst.analyze(pair, candles_15m)
@@ -258,7 +272,7 @@ class DirectionalStrategist:
                 reasons.append("Regular Bullish RSI Divergence confirmed (Price LL vs RSI HL)")
 
             # RSI Levels & Exhaustion Guard (avoid chasing oversold shorts / overbought longs)
-            if tech_result.rsi >= self.SHORT_FADE_RSI_MIN:
+            if tech_result.rsi >= self._short_rsi_min():
                 # Overbought rally inside a 4h downtrend is the one short setup that held up in backtest
                 short_score += 0.20 if align_4h == TrendAlignment.BEARISH.value else 0.05
                 long_score -= 0.10
@@ -325,6 +339,16 @@ class DirectionalStrategist:
             long_score = max(long_score, 0.0) + self.NEWS_CONVICTION_BOOST
             reasons.append("NEWS OVERRIDE: confirmed bullish shock, forcing long with wide stop")
 
+        # Frequent mode defines its entries directly (the scoring above is tuned for the selective rule)
+        if self.frequent_mode and news is None and tech_result is not None and pair in MARGIN_PAIRS:
+            if align_4h == TrendAlignment.BEARISH.value and tech_result.rsi >= self.FREQ_SHORT_RSI_MIN:
+                short_score = max(short_score, self.FREQ_CONVICTION)
+                reasons.append(f"FREQUENT MODE: sell rally (RSI {tech_result.rsi:.1f}) in 4h downtrend")
+            elif align_4h == TrendAlignment.BULLISH.value and tech_result.rsi <= self.FREQ_LONG_RSI_MAX:
+                long_score = max(long_score, self.FREQ_CONVICTION)
+                long_eligible = True
+                reasons.append(f"FREQUENT MODE: buy dip (RSI {tech_result.rsi:.1f}) in 4h uptrend")
+
         short_conviction = min(1.0, max(0.0, round(short_score, 2)))
         long_conviction = min(1.0, max(0.0, round(long_score, 2))) if long_eligible else 0.0
 
@@ -338,12 +362,12 @@ class DirectionalStrategist:
         elif align_4h == TrendAlignment.BULLISH.value:
             short_allowed = False
             reasons.append("Short gated: 4h trend is BULLISH")
-        elif tech_result is not None and tech_result.rsi < self.SHORT_FADE_RSI_MIN:
+        elif tech_result is not None and tech_result.rsi < self._short_rsi_min():
             short_allowed = False
             reasons.append(
-                f"Short gated: RSI {tech_result.rsi:.1f} < {self.SHORT_FADE_RSI_MIN:.0f}, waiting for an overbought rally to sell"
+                f"Short gated: RSI {tech_result.rsi:.1f} < {self._short_rsi_min():.0f}, waiting for an overbought rally to sell"
             )
-        elif trend_1h is not None and trend_1h.ema20 > 0 and trend_1h.ema50 > 0 and (
+        elif not self.frequent_mode and trend_1h is not None and trend_1h.ema20 > 0 and trend_1h.ema50 > 0 and (
             align_1h == TrendAlignment.BULLISH.value or trend_1h.ema20 >= trend_1h.ema50
         ):
             # 150-day replay: the same rally-fade made ~+0.23%/trade with the 1h EMA20 below the 1h EMA50
@@ -380,6 +404,10 @@ class DirectionalStrategist:
             # Take Profit: fixed SHORT_TP_PCT below entry (matches the orchestrator's live exit)
             tp_px = entry_px * (1.0 - self.SHORT_TP_PCT)
 
+            if self.frequent_mode and news is None:
+                stop_px = self._swing_stop(entry_px, last_px, "short", candles_15m)
+                tp_px = entry_px * (1.0 - self.FREQ_TP_PCT)
+
             if news == "BEARISH":
                 # Do not wait for a pullback after a shock: rest at the top of the book, wider stop and target
                 entry_px = max(best_ask, last_px)
@@ -406,6 +434,10 @@ class DirectionalStrategist:
 
             # Take Profit: fixed LONG_TP_PCT above entry (matches the orchestrator's live exit)
             tp_px = entry_px * (1.0 + self.LONG_TP_PCT)
+
+            if self.frequent_mode and news is None:
+                stop_px = self._swing_stop(entry_px, last_px, "long", candles_15m)
+                tp_px = entry_px * (1.0 + self.FREQ_TP_PCT)
 
             if news == "BULLISH":
                 entry_px = min(best_bid, last_px)
@@ -447,6 +479,24 @@ class DirectionalStrategist:
             trend_15m=align_15m,
             news_driven=bool(news) and action in ("SHORT", "LONG"),
         )
+
+    def _short_rsi_min(self) -> float:
+        return self.FREQ_SHORT_RSI_MIN if self.frequent_mode else self.SHORT_FADE_RSI_MIN
+
+    def _swing_stop(self, entry_px: float, last_px: float, side: str, candles_15m: Optional[List[Any]]) -> float:
+        """Stop a little beyond the recent rebound: past the last 2h swing high (short) or swing low (long)
+        plus a buffer, never closer than SWING_MIN_STOP_PCT nor further than STOP_PCT from entry."""
+        recent = list(candles_15m[-self.SWING_LOOKBACK_15M:]) if candles_15m else []
+        if side == "short":
+            extreme = max([c.high for c in recent] + [last_px, entry_px])
+            dist = (extreme * (1.0 + self.SWING_BUFFER_PCT) - entry_px) / entry_px
+        else:
+            extreme = min([c.low for c in recent] + [last_px, entry_px])
+            dist = (entry_px - extreme * (1.0 - self.SWING_BUFFER_PCT)) / entry_px
+        if not recent:
+            dist = self.STOP_PCT
+        dist = min(self.STOP_PCT, max(self.SWING_MIN_STOP_PCT, dist))
+        return entry_px * (1.0 + dist) if side == "short" else entry_px * (1.0 - dist)
 
     def scan_all_pairs(
         self,
