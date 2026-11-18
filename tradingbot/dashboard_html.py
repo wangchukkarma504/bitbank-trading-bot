@@ -1328,7 +1328,7 @@ function renderMarketChart() {
   const tpPx = openPos ? Number(openPos.take_profit_price || 0) : 0;
   const side = openPos ? String(openPos.position_side || 'short') : (pending ? pending.side : '');
 
-  const padL = 6, padR = isMobile ? 74 : 86, padT = isMobile ? 52 : 30, padB = 22;  // padT leaves room for the OHLC readout
+  const padL = 6, padR = isMobile ? 74 : 86, padT = isMobile ? 46 : 30, padB = 22;  // padT leaves room for the OHLC readout
   const plotW = W - padL - padR;
   const rsiH = isMobile ? 62 : 74;
   const gap = 10;
@@ -1494,11 +1494,14 @@ function renderMarketChart() {
     const chg = c.o > 0 ? (c.c - c.o) / c.o * 100 : 0;
     const col = c.c >= c.o ? C.up : C.down;
     const r = rsi[i];
+    const ohlc = isMobile
+      ? `H ${fmtPx(c.h).replace('¥', '')} L ${fmtPx(c.l).replace('¥', '')} C ${fmtPx(c.c).replace('¥', '')} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)`
+      : `O ${fmtPx(c.o).replace('¥', '')} H ${fmtPx(c.h).replace('¥', '')} L ${fmtPx(c.l).replace('¥', '')} C ${fmtPx(c.c).replace('¥', '')} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)`;
     return `<span style="color:${C.text};">${new Date(c.t).toLocaleString('ja-JP', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})}</span>
-      <span style="color:${col};">O ${fmtPx(c.o).replace('¥', '')} H ${fmtPx(c.h).replace('¥', '')} L ${fmtPx(c.l).replace('¥', '')} C ${fmtPx(c.c).replace('¥', '')} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)</span>
+      <span style="color:${col};">${ohlc}</span>
       <span style="color:${C.ema20};">EMA20 ${ema20[i] ? fmtPx(ema20[i]).replace('¥', '') : '--'}</span>
       <span style="color:${C.ema50};">EMA50 ${ema50[i] ? fmtPx(ema50[i]).replace('¥', '') : '--'}</span>
-      <span style="color:${C.bb};">BB ${bbLo[i] ? fmtPx(bbLo[i]).replace('¥', '') : '--'} – ${bbUp[i] ? fmtPx(bbUp[i]).replace('¥', '') : '--'}</span>
+      ${isMobile ? '' : `<span style="color:${C.bb};">BB ${bbLo[i] ? fmtPx(bbLo[i]).replace('¥', '') : '--'} – ${bbUp[i] ? fmtPx(bbUp[i]).replace('¥', '') : '--'}</span>`}
       <span style="color:${C.rsi};">RSI ${r !== null && r !== undefined ? r.toFixed(1) : '--'}</span>`;
   };
 
@@ -1506,7 +1509,7 @@ function renderMarketChart() {
   wrap.style.borderRadius = '12px';
   wrap.style.overflow = 'hidden';
   wrap.innerHTML = `
-    <div id="marketTooltip" style="position:absolute;top:6px;left:10px;right:${padR + 6}px;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:${isMobile ? 10 : 11}px;font-weight:700;pointer-events:none;z-index:5;line-height:1.35;"></div>
+    <div id="marketTooltip" style="position:absolute;top:6px;left:10px;right:${isMobile ? 8 : padR + 6}px;display:flex;flex-wrap:wrap;gap:${isMobile ? '1px 8px' : '4px 10px'};font-size:${isMobile ? 9.5 : 11}px;font-weight:700;pointer-events:none;z-index:5;line-height:1.3;max-height:${isMobile ? 38 : 22}px;overflow:hidden;"></div>
     <svg id="marketSvg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" style="cursor:crosshair;display:block;">
       <rect x="0" y="0" width="${W}" height="${H}" fill="${C.bg}"/>
       ${grid}

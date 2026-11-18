@@ -172,5 +172,69 @@ class TestTradeJournal(unittest.TestCase):
         self.assertEqual(lesson.exit_reason, "EXCHANGE_STOP_OR_MANUAL")
 
 
+class TestStressRegressions(unittest.TestCase):
+    """Bugs found by driving the loop against the mock exchange with gaps, API failures and restarts."""
+
+    def _orch(self) -> TradingOrchestrator:
+        client = MagicMock()
+        client.order.return_value = {"order_id": 900, "status": "UNFILLED"}
+        orch = TradingOrchestrator(client=client, baseline_budget_jpy=20000.0, mode="live", pairs=["eth_jpy"])
+        orch.INTER_PAIR_SLEEP_SEC = 0.0
+        orch.loss_learner = LossLearningEngine(state_path="")
+        orch.trend_analyst.evaluate_btc_regime = MagicMock(return_value=False)
+        orch.macro_analyst.analyze = MagicMock(return_value=None)
+        orch.dashboard.render = MagicMock(return_value="OK")
+        orch.directional_strategist.evaluate_pair = MagicMock(return_value=DirectionalSignal(
+            pair="eth_jpy", action="NEUTRAL", position_type="none", conviction=0.1,
+            entry_price=290000.0, stop_loss_price=0.0, take_profit_price=0.0,
+        ))
+        return orch
+
+    def _naked_review(self, last_px: float) -> PositionReviewResult:
+        pos = {"pair": "eth_jpy", "position_side": "short", "open_amount": "0.0900", "amount": 0.09,
+               "avg_price": 290000.0, "last_price": last_px, "unrealized_pnl_jpy": 0.09 * (290000.0 - last_px),
+               "notional_jpy": 0.09 * last_px}
+        rev = _review(20000.0)
+        rev.open_positions = [pos]
+        rev.naked_positions = [dict(pos, unprotected_amount=0.09)]
+        return rev
+
+    def test_filled_entry_gets_stop_at_planned_distance_from_entry_not_from_last_price(self):
+        orch = self._orch()
+        orch.position_reviewer.review = MagicMock(return_value=self._naked_review(last_px=292000.0))
+        orch.tick()
+        stop_calls = [c for c in orch.client.order.call_args_list if c.kwargs.get("type_") == "stop"]
+        self.assertEqual(len(stop_calls), 1)
+        self.assertEqual(stop_calls[0].kwargs["trigger_price"], "293480")  # 290000 * 1.012, not 292000 * 1.015
+
+    def test_unprotected_position_already_past_its_stop_is_closed_at_market(self):
+        orch = self._orch()
+        orch.client.margin_positions.return_value = [
+            {"pair": "eth_jpy", "position_side": "short", "open_amount": "0.0900", "average_price": "290000"}
+        ]
+        orch.position_reviewer.review = MagicMock(return_value=self._naked_review(last_px=295000.0))
+        orch.tick()
+        types = [c.kwargs.get("type_") for c in orch.client.order.call_args_list]
+        self.assertIn("market", types)
+        self.assertNotIn("stop", types)
+
+    def test_orphan_stop_is_cancelled_after_two_flat_reviews(self):
+        orch = self._orch()
+
+        def flat_with_stop():
+            rev = _review(20000.0)
+            rev.active_stops = [{"order_id": 555, "pair": "eth_jpy", "side": "buy", "type": "stop",
+                                 "position_side": "short", "trigger_price": "293480", "status": "INACTIVE",
+                                 "remaining_amount": "0.0900"}]
+            rev.active_orders = list(rev.active_stops)
+            return rev
+
+        orch.position_reviewer.review = MagicMock(side_effect=lambda **k: flat_with_stop())
+        orch.tick()
+        orch.client.cancel.assert_not_called()  # first sighting: could be a race with a brand-new position
+        orch.tick()
+        orch.client.cancel.assert_called_once_with("eth_jpy", 555)
+
+
 if __name__ == "__main__":
     unittest.main()

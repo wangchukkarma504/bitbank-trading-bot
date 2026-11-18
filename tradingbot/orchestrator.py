@@ -155,6 +155,7 @@ class TradingOrchestrator:
         # Signal that produced each resting entry order, so the journal records the real entry context
         self._pending_entry_signals: Dict[str, DirectionalSignal] = {}
         self._last_exit_reason: Dict[str, str] = {}
+        self._orphan_stop_seen: set = set()
 
     def _load_daily_state(self) -> None:
         if not self.daily_state_path or not os.path.exists(self.daily_state_path):
@@ -400,8 +401,27 @@ class TradingOrchestrator:
                 ad = cfg.amount_digits if cfg else 4
                 amt_str = f"{full_amt:.{ad}f}"
 
-                # Calculate emergency stop loss level (1.5% away)
-                stop_trig = last_px * 1.015 if side == "short" else last_px * 0.985
+                # A resting maker entry normally fills between ticks, so this is the usual way a new position
+                # gets its stop. Use the planned distance from the ENTRY price (what the position was sized for),
+                # not a distance from the current price, which silently widened the risk after any adverse move.
+                avg_px = float(naked_pos.get("avg_price", naked_pos.get("average_price", 0.0)) or 0.0)
+                ref_px = avg_px if avg_px > 0 else last_px
+                stop_pct = self.directional_strategist.STOP_PCT
+                planned = ref_px * (1.0 + stop_pct) if side == "short" else ref_px * (1.0 - stop_pct)
+                stop_trig = self.loss_learner.adjust_stop_price(ref_px, planned, side)
+                stop_breached = last_px > 0 and (
+                    (side == "short" and last_px >= stop_trig) or (side != "short" and last_px <= stop_trig)
+                )
+
+                if stop_breached and not self.dry_run:
+                    # Price is already through the planned stop: close now instead of parking a stop further away
+                    self.logger.error(
+                        f"Unprotected {pair} {side} is already past its planned stop ({last_px} vs {stop_trig:.4f}); closing at market."
+                    )
+                    self._last_exit_reason[pair] = "STOP_ALREADY_BREACHED"
+                    self.risk_manager.emergency_market_cover(pair, client=self.client)
+                    review_res.open_positions = [p for p in review_res.open_positions if p.get("pair") != pair]
+                    continue
 
                 if not self.dry_run:
                     self.logger.info(f"Attaching immediate protective stop on naked {pair} {side} at {stop_trig}...")
@@ -420,6 +440,42 @@ class TradingOrchestrator:
                     self.logger.info(
                         f"[DRY-RUN AUDIT] Would attach native exchange stop on naked {pair} ({side}): qty={amt_str}, trigger={stop_trig:,.1f}"
                     )
+
+        # Orphan stop cleanup: a stop left behind after its position closed (e.g. the maker take-profit filled
+        # first) would later be counted as protection for a NEW position at a stale price. Cancel it once the
+        # pair has been flat on two consecutive clean reviews.
+        if (
+            not self.dry_run
+            and self.allow_shorts
+            and not review_query_failed
+            and not getattr(review_res, "has_query_error", False)
+        ):
+            open_pairs_now = {p.get("pair") for p in review_res.open_positions}
+            orphan_ids = set()
+            remaining_stops = []
+            for s in review_res.active_stops:
+                s_pair, s_oid = s.get("pair"), s.get("order_id")
+                if s_pair in open_pairs_now or s_oid is None:
+                    remaining_stops.append(s)
+                    continue
+                orphan_ids.add(s_oid)
+                if s_oid in self._orphan_stop_seen:
+                    self.logger.warning(f"Cancelling orphan stop {s_oid} on {s_pair}: no open position on this pair.")
+                    try:
+                        self.client.cancel(s_pair, s_oid)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to cancel orphan stop {s_oid} on {s_pair}: {e}")
+                        remaining_stops.append(s)
+                        continue
+                    mgr = self.risk_manager.get_sync_manager(s_pair, self.client)
+                    if mgr.current_stop_id == s_oid:
+                        mgr.current_stop_id = None
+                        mgr.current_stop_level = None
+                        mgr.current_stop_qty = None
+                else:
+                    remaining_stops.append(s)
+            self._orphan_stop_seen = orphan_ids
+            review_res.active_stops = remaining_stops
 
         # =====================================================================
         # STEP 2: Role 3 (Market Trend Analyst) - BTC Macro Regime Filter
@@ -694,6 +750,10 @@ class TradingOrchestrator:
                     if best_candidate is None or eff_conv > best_eff_conv:
                         best_candidate = sig
                         best_eff_conv = eff_conv
+
+            if best_candidate is not None and review_res.total_equity_jpy <= 0:
+                self.logger.error("Equity is not positive; skipping new entries.")
+                best_candidate = None
 
             if best_candidate is not None:
                 equity = review_res.total_equity_jpy
