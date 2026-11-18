@@ -1,34 +1,36 @@
-"""Tests for FastAPI Live Control Server & Web Dashboard."""
+"""Tests for the control server and web dashboard."""
 
+import json
+import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from tradingbot.analysis.loss_learner import LossLearningEngine
-from tradingbot.orchestrator import TradingOrchestrator
+from tradingbot.engine import Account, Engine, Position, Settings
 from tradingbot.server import BotController, create_app
 
 
 class TestFastAPIServer(unittest.TestCase):
-    def _make_client(self, mode: str = "live"):
+    def _make_client(self, mode: str = "live", config_path: str = "", auto_start: bool = False):
         mock_bb = MagicMock()
-        mock_bb._get.return_value = {"orders": [{"order_id": "555", "type": "stop"}]}
+        mock_bb._get.return_value = {"orders": [{"order_id": "555", "pair": "xrp_jpy", "type": "stop"}]}
         mock_bb.margin_positions.return_value = [
             {"pair": "xrp_jpy", "position_side": "short", "open_amount": "100.0"}
         ]
         mock_bb.order.return_value = {"order_id": "777", "status": "FULLY_FILLED"}
 
-        orch = TradingOrchestrator(client=mock_bb, baseline_budget_jpy=98874.1, mode=mode)
-        orch.loss_learner = LossLearningEngine(state_path="")
+        engine = Engine(client=mock_bb, mode=mode, settings=Settings(baseline_jpy=98874.1),
+                        state_path=None, journal_path=None)
         controller = BotController(
-            orch,
+            engine,
             history_path="",
-            config_path="",
+            config_path=config_path,
             env_path="",
             tax_profile_path="",
             trade_log_path="",
-            auto_start=False,
+            auto_start=auto_start,
         )
         app = create_app(controller)
         return TestClient(app), controller, mock_bb
@@ -39,6 +41,7 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(r_html.status_code, 200)
         self.assertIn("STOP ALL TRADES", r_html.text)
         self.assertIn("Per-Trade Profit &amp; Loss", r_html.text)
+        self.assertIn("Breakout watch", r_html.text)
 
         r_health = client.get("/health")
         self.assertEqual(r_health.status_code, 200)
@@ -50,6 +53,8 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertIn("equity_jpy", data)
         self.assertIn("in_trade_pnl_jpy", data)
         self.assertEqual(data["milestones"]["x10"]["target"], 1000000.0)
+        self.assertEqual([s["pair"] for s in data["signals"]], ["btc_jpy", "eth_jpy", "xrp_jpy", "sol_jpy", "doge_jpy"])
+        self.assertIn("20-day high", data["rule"]["summary"])
 
     def test_pause_resume_and_emergency_stop_all(self):
         client, controller, mock_bb = self._make_client(mode="live")
@@ -65,9 +70,38 @@ class TestFastAPIServer(unittest.TestCase):
         body = r_stop.json()
         self.assertEqual(body["status"], "EMERGENCY_STOPPED")
         self.assertTrue(controller.emergency_stopped)
+        self.assertFalse(controller.engine.entries_enabled)
         self.assertGreaterEqual(len(body["cancelled_orders"]), 1)
         self.assertEqual(len(body["closed_positions"]), 1)
         mock_bb.order.assert_called_once()
+
+    def test_pause_and_emergency_stop_survive_a_restart(self):
+        path = os.path.join(tempfile.mkdtemp(), "bot_config.json")
+        client, controller, _ = self._make_client(config_path=path, auto_start=True)
+        self.assertEqual(client.get("/api/status").json()["state"], "RUNNING")
+        client.post("/api/pause")
+        _, again, _ = self._make_client(config_path=path, auto_start=True)
+        self.assertFalse(again.running)                       # a restart does not quietly resume trading
+        self.assertFalse(again.engine.entries_enabled)
+        client.post("/api/emergency-stop")
+        client3, third, _ = self._make_client(config_path=path, auto_start=True)
+        self.assertTrue(third.emergency_stopped)
+        self.assertEqual(client3.get("/api/status").json()["state"], "EMERGENCY_STOPPED")
+        client3.post("/api/resume")
+        _, fourth, _ = self._make_client(config_path=path, auto_start=True)
+        self.assertTrue(fourth.running)
+        self.assertTrue(fourth.engine.entries_enabled)
+
+    def test_risk_settings_come_from_the_config_file(self):
+        path = os.path.join(tempfile.mkdtemp(), "bot_config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"baseline_jpy": 20000.66, "equity_floor_jpy": 15000.0, "risk_per_trade_pct": 1.5,
+                       "max_positions": 2, "allow_shorts": True, "scale_in": True}, f)   # old keys are ignored
+        _, controller, _ = self._make_client(config_path=path)
+        self.assertAlmostEqual(controller.engine.params.risk_per_trade, 0.015)
+        self.assertEqual(controller.engine.params.max_positions, 2)
+        self.assertEqual(controller.engine.settings.equity_floor_jpy, 15000.0)
+        self.assertAlmostEqual(controller.engine.settings.baseline_jpy, 20000.66)
 
     def test_update_config_capital_and_api_key_masked(self):
         client, controller, _ = self._make_client(mode="dry-run")
@@ -80,7 +114,7 @@ class TestFastAPIServer(unittest.TestCase):
         body = r.json()
         self.assertTrue(body["ok"])
         self.assertEqual(body["capital_limit_jpy"], 50000.0)
-        self.assertEqual(controller.orchestrator.capital_limit_jpy, 50000.0)
+        self.assertEqual(controller.engine.settings.capital_limit_jpy, 50000.0)
 
         st = client.get("/api/status").json()
         self.assertTrue(st["api_key_configured"])
@@ -138,61 +172,57 @@ class TestFastAPIServer(unittest.TestCase):
             else:
                 os.environ["DASHBOARD_PASS"] = old_p
 
-    def test_close_position_endpoint_and_est_net_pnl(self):
-        client, controller, mock_exchange = self._make_client(mode="live")
-        orch = controller.orchestrator
+    def test_status_shows_positions_stops_and_pending_orders(self):
+        client, controller, _ = self._make_client(mode="live")
+        eng = controller.engine
+        eng.positions["eth_jpy"] = {"entry": 300000.0, "dist": 0.06, "plan_stop": 282000.0, "stop": 282000.0}
+        eng.account = Account(
+            equity=21000.0, free_jpy=15000.0,
+            positions={("eth_jpy", "long"): Position("eth_jpy", "long", 0.02, 300000.0, 310000.0),
+                       ("sol_jpy", "short"): Position("sol_jpy", "short", 1.0, 12000.0, 11900.0)},
+            orders=[{"order_id": 1, "pair": "eth_jpy", "type": "stop", "side": "sell", "position_side": "long",
+                     "trigger_price": "291400", "remaining_amount": "0.0200", "status": "INACTIVE"},
+                    {"order_id": 2, "pair": "xrp_jpy", "type": "limit", "side": "sell", "position_side": "short",
+                     "price": "160.0", "remaining_amount": "100.0", "status": "UNFILLED"}],
+            prices={})
+        st = client.get("/api/status").json()
+        rows = {(p["pair"], p["position_side"]): p for p in st["open_positions"]}
+        eth = rows[("eth_jpy", "long")]
+        self.assertEqual(eth["owner"], "bot")
+        self.assertEqual(eth["stop_trigger_price"], 291400.0)
+        self.assertAlmostEqual(eth["unrealized_pnl_jpy"], 200.0)
+        self.assertLess(eth["est_net_close_pnl_jpy"], eth["unrealized_pnl_jpy"])     # the closing fee is counted
+        self.assertLess(eth["est_stop_pnl_jpy"], 0.0)
+        sol = rows[("sol_jpy", "short")]
+        self.assertEqual(sol["owner"], "manual")
+        self.assertNotIn("stop_trigger_price", sol)                                 # nothing protects it yet
+        self.assertEqual(len(st["active_stops"]), 1)
+        pend = st["pending_orders"][0]
+        self.assertEqual((pend["pair"], pend["side"], pend["price"]), ("xrp_jpy", "short", 160.0))
+        self.assertAlmostEqual(pend["planned_stop_price"], 160.0 * 1.012, places=3)
+        self.assertIsNone(pend["planned_take_profit_price"])
+        self.assertAlmostEqual(st["equity_jpy"], 21000.0)
+
+    def test_close_position_endpoint(self):
+        client, _, mock_exchange = self._make_client(mode="live")
         mock_exchange._get.return_value = {"orders": [{"order_id": "555", "pair": "btc_jpy", "type": "stop"}]}
         mock_exchange.margin_positions.return_value = [
-            {"pair": "btc_jpy", "position_side": "short", "open_amount": "0.0191"}
+            {"pair": "btc_jpy", "position_side": "short", "open_amount": "0.0191"},
+            {"pair": "eth_jpy", "position_side": "long", "open_amount": "0.0200"},
         ]
         mock_exchange.order.return_value = {"order_id": "888", "status": "FULLY_FILLED"}
-
-        from tradingbot.execution.position_reviewer import PositionReviewResult
-        orch.last_review = PositionReviewResult(
-            baseline_budget_jpy=100000.0,
-            total_equity_jpy=99000.0,
-            free_cash_jpy=99000.0,
-            locked_cash_jpy=0.0,
-            buying_power_jpy=198000.0,
-            pnl_jpy=-1000.0,
-            pnl_pct=-1.0,
-            open_positions=[{
-                "pair": "btc_jpy",
-                "position_side": "short",
-                "open_amount": "0.0191",
-                "amount": 0.0191,
-                "avg_price": 10338244.0,
-                "last_price": 10400000.0,
-                "unrealized_pnl_jpy": -1179.54,
-                "notional_jpy": 198640.0,
-            }],
-            active_stops=[{
-                "order_id": "555",
-                "pair": "btc_jpy",
-                "position_side": "short",
-                "trigger_price": "10524309",
-            }],
-        )
-
-        st = client.get("/api/status").json()
-        p0 = st["open_positions"][0]
-        self.assertIn("est_close_fee_jpy", p0)
-        self.assertIn("est_net_close_pnl_jpy", p0)
-        self.assertIn("est_stop_pnl_jpy", p0)
-        self.assertLess(p0["est_net_close_pnl_jpy"], p0["unrealized_pnl_jpy"])
-
         r_close = client.post("/api/close-position", json={"pair": "btc_jpy", "position_side": "short"})
         self.assertEqual(r_close.status_code, 200)
         body = r_close.json()
         self.assertEqual(body["status"], "CLOSED")
         self.assertEqual(len(body["cancelled_orders"]), 1)
-        self.assertEqual(len(body["closed_positions"]), 1)
+        self.assertEqual(len(body["closed_positions"]), 1)                          # only the pair that was asked for
         self.assertEqual(body["closed_positions"][0]["order_id"], "888")
+        self.assertEqual(client.post("/api/close-position", json={"pair": "ada_jpy"}).status_code, 400)
 
-    def test_goal_auto_adjust_manual_override_and_spot_only_mode(self):
-        client, controller, mock_bb = self._make_client(mode="live")
-
-        # 1. Deposit +10,000 JPY into baseline (98874.1 -> 108874.1): goals auto-adjust
+    def test_goal_and_baseline_settings(self):
+        client, _, _ = self._make_client(mode="live")
+        # A deposit of 10,000 JPY raises the baseline (98,874.1 -> 108,874.1): the goals follow
         r_dep = client.post("/api/config", json={"baseline_jpy": 108874.1})
         self.assertEqual(r_dep.status_code, 200)
         st = client.get("/api/status").json()
@@ -200,30 +230,20 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(st["milestones"]["x2"]["target"], 218000.0)
         self.assertEqual(st["milestones"]["x10"]["target"], 1089000.0)
 
-        # 2. Manual goal override
         r_goal = client.post("/api/config", json={"goal_target_jpy": 350000.0})
         self.assertEqual(r_goal.status_code, 200)
         st2 = client.get("/api/status").json()
         self.assertEqual(st2["goal_target_jpy"], 350000.0)
         self.assertEqual(st2["milestones"]["x2"]["target"], 350000.0)
 
-        # Reset manual goal (0 -> back to auto-adjusted 2x)
         client.post("/api/config", json={"goal_target_jpy": 0})
         st3 = client.get("/api/status").json()
         self.assertIsNone(st3["goal_target_jpy"])
         self.assertEqual(st3["milestones"]["x2"]["target"], 218000.0)
 
-        # 3. Spot Long-Only mode disables margin_positions() and blocks SHORT entries
-        r_spot = client.post("/api/config", json={"allow_shorts": False})
-        self.assertEqual(r_spot.status_code, 200)
-        self.assertFalse(controller.orchestrator.allow_shorts)
-        st4 = client.get("/api/status").json()
-        self.assertFalse(st4["allow_shorts"])
-
-        mock_bb.margin_positions.reset_mock()
-        rev = controller.orchestrator.position_reviewer.review(client=mock_bb, allow_shorts=False)
-        mock_bb.margin_positions.assert_not_called()
-        self.assertEqual(rev.open_positions, [])
+        # Settings of the previous engine are accepted and ignored, so an old browser tab cannot break anything
+        r_old = client.post("/api/config", json={"allow_shorts": False, "force_profit_close_jpy": 2000.0})
+        self.assertEqual(r_old.status_code, 200)
 
     def test_candles_endpoint_and_market_chart_ui(self):
         client, _, mock_bb = self._make_client(mode="live")
@@ -261,79 +281,6 @@ class TestFastAPIServer(unittest.TestCase):
 
         r_html = client.get("/")
         self.assertIn("manifest.webmanifest", r_html.text)
-
-    def test_force_profit_close_config_and_trigger(self):
-        from tradingbot.execution.position_reviewer import PositionReviewResult
-        client, controller, mock_bb = self._make_client(mode="live")
-        r_set = client.post("/api/config", json={"force_profit_close_jpy": 2000.0})
-        self.assertEqual(r_set.status_code, 200)
-        self.assertEqual(controller.orchestrator.force_profit_close_jpy, 2000.0)
-        self.assertEqual(client.get("/api/status").json()["force_profit_close_jpy"], 2000.0)
-
-        # Below threshold (est_net_pnl = 1500 - 240 = 1260 < 2000): should NOT force-close
-        orch = controller.orchestrator
-        orch.pairs = []
-        orch.position_reviewer.review = lambda client=None, allow_shorts=True: PositionReviewResult(
-            baseline_budget_jpy=98874.1,
-            total_equity_jpy=100374.1,
-            free_cash_jpy=100000.0,
-            locked_cash_jpy=0.0,
-            buying_power_jpy=200000.0,
-            pnl_jpy=1500.0,
-            pnl_pct=1.5,
-            open_positions=[{
-                "pair": "btc_jpy",
-                "position_side": "short",
-                "open_amount": "0.0191",
-                "amount": 0.0191,
-                "avg_price": 10338244.0,
-                "last_price": 10259710.0,
-                "unrealized_pnl_jpy": 1500.0,
-                "notional_jpy": 200000.0,
-            }],
-            active_stops=[{"order_id": "555", "pair": "btc_jpy", "position_side": "short", "trigger_price": "10350000"}],
-        )
-        mock_bb.order.reset_mock()
-        orch.tick()
-        # Normal flow may ratchet the stop, but must NOT market-close below target
-        market_calls = [c for c in mock_bb.order.call_args_list if c.kwargs.get("type_") == "market"]
-        self.assertEqual(market_calls, [])
-
-        # Above threshold (est_net_pnl = 2300 - 240 = 2060 >= 2000): SHOULD cancel stop & market-close
-        orch.position_reviewer.review = lambda client=None, allow_shorts=True: PositionReviewResult(
-            baseline_budget_jpy=98874.1,
-            total_equity_jpy=101174.1,
-            free_cash_jpy=100000.0,
-            locked_cash_jpy=0.0,
-            buying_power_jpy=200000.0,
-            pnl_jpy=2300.0,
-            pnl_pct=2.3,
-            open_positions=[{
-                "pair": "btc_jpy",
-                "position_side": "short",
-                "open_amount": "0.0191",
-                "amount": 0.0191,
-                "avg_price": 10338244.0,
-                "last_price": 10217825.0,
-                "unrealized_pnl_jpy": 2300.0,
-                "notional_jpy": 200000.0,
-            }],
-            active_stops=[{"order_id": "555", "pair": "btc_jpy", "position_side": "short", "trigger_price": "10350000"}],
-        )
-        mock_bb.order.reset_mock()
-        orch.tick()
-        mock_bb.cancel.assert_any_call("btc_jpy", "555")
-        mock_bb.order.assert_called_once_with("btc_jpy", side="buy", amount="0.0191", type_="market", position_side="short")
-
-        # Disable with 0
-        r_off = client.post("/api/config", json={"force_profit_close_jpy": 0})
-        self.assertEqual(r_off.status_code, 200)
-        self.assertIsNone(controller.orchestrator.force_profit_close_jpy)
-
-        # Counter-trend longs are off by default (they lost in the 150-day replay); /api/config can enable them
-        self.assertFalse(controller.orchestrator.allow_counter_trend_longs)
-        self.assertFalse(controller.orchestrator.directional_strategist.allow_counter_trend_longs)
-        self.assertFalse(client.get("/api/status").json()["allow_counter_trend_longs"])
 
     def test_japan_tax_report_profile_and_csv(self):
         client, _, mock_bb = self._make_client()

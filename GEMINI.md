@@ -5,10 +5,11 @@
 - Never commit or print API keys from `/home/karma/Trading-bot/.env`.
 
 ## Autonomous Mandate & Strategy Execution
-- **Full Delegation:** Execute trades autonomously across both Long (spot) and Short (margin) setups without requiring manual step-by-step user confirmation.
-- **Trading engine:** one process, `python3 -m tradingbot.server` (`tradingbot/orchestrator.py`), one position at a time.
-- **Short Trading (main rule):** margin short only when the 4h trend is down, the 1h EMA20 is below the 1h EMA50 and the 15m RSI is 65 or higher. Maker limit entry in three steps (50% / 20% / 30%), exchange stop 1.2% above entry, no fixed target: from +1.6% a trailing stop locks profit and follows the price.
-- **Long Trading:** spot longs only when the BTC regime is bullish (above the 4h EMA200).
+- **Trading engine:** one process, `python3 -m tradingbot.server` (`tradingbot/engine.py`). The rule lives in `tradingbot/strategy.py` and is replayed by `python3 -m tradingbot.backtest`.
+- **Rule (long only):** buy a coin when a 4h candle closes above its 20-day high; exchange stop 3 ATR below, trailing up behind the best price, never down; no profit target; 2% of equity at risk per trade; at most 3 positions.
+- **No shorts.** Selling rallies and shorting breakdowns were tested on years of Bitbank candles and rejected (see README, "Evidence").
+- **Manual trades:** never managed, closed or cancelled by the bot. A manual position without a stop gets a protective one 1.2% from entry.
+- **Changing the rule:** only with a replay over all available years that is positive both before and after 2023.
 
 ## Capital Preservation & Risk Controls (Non-Negotiable)
 1. **Exchange-Side Stops:** Every margin short MUST have an active exchange-side stop order placed immediately upon fill. Never leave naked positions.

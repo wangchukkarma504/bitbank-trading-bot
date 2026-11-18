@@ -364,7 +364,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="card">
       <h2>Capital Milestones</h2>
       <div id="milestonesBox"></div>
-      <h2 style="margin-top:18px;">Macro & News Catalyst</h2>
+      <h2 style="margin-top:18px;">How the bot trades</h2>
       <div id="macroBox" style="font-size:13px;color:var(--muted);">Loading...</div>
     </div>
   </div>
@@ -381,16 +381,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div style="margin-top:10px;font-size:12px;color:var(--muted);" id="stopsLine">Active Stops: 0</div>
     </div>
     <div class="card">
-      <h2>Auto-Learn Loss Engine</h2>
+      <h2>Closed trades (bot)</h2>
       <div id="lessonsBox" style="font-size:13px;color:var(--muted);">No closed trades recorded yet.</div>
     </div>
   </div>
 
   <div class="card">
-    <h2>11-Pair Market Radar (5 Margin + 6 Spot Altcoins)</h2>
+    <h2>Breakout watch</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Pair</th><th>Bias</th><th>Conviction</th><th>Entry</th><th>Stop</th><th>TP</th><th>Wick</th><th>Depth</th></tr></thead>
+        <thead><tr><th>Coin</th><th>State</th><th>4h close</th><th>20-day high</th><th>Gap to breakout</th><th>Stop distance</th><th>Detail</th></tr></thead>
         <tbody id="radarBody"></tbody>
       </table>
     </div>
@@ -523,7 +523,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <button class="btn-danger-sm" id="removeKeyBtn" onclick="removeApiKey()" style="display:none;">Remove API Key</button>
     </div>
 
-    <div class="sec-card">
+    <div class="sec-card" style="display:none;">
       <div class="sec-title">Trading Mode &amp; Auto Take-Profit</div>
 
       <div class="field">
@@ -829,6 +829,7 @@ async function refresh() {
       (d.daily_loss_halted ? ' | DAILY LOSS LIMIT: no new entries until tomorrow (JST)' : '') +
       (d.news_override ? ` | NEWS OVERRIDE ${d.news_override.bias}: ${d.news_override.headline}` : '') +
       (d.equity_floor_hit ? ` | EQUITY FLOOR ¥${Math.round(d.equity_floor_jpy).toLocaleString('en-US')} HIT: no new entries` : '') +
+      (d.state !== 'RUNNING' ? ' | New entries OFF (open positions keep their stops)' : '') +
       (d.cooldown_sec > 0 ? ` | Cooldown: ${d.cooldown_sec}s` : '');
 
     const apiBadge = document.getElementById('apiBadge');
@@ -957,10 +958,8 @@ async function refresh() {
       </div>`;
     }).join('');
 
-    if (d.macro) {
-      document.getElementById('macroBox').innerHTML =
-        `<div><b>Fear & Greed:</b> ${d.macro.fear_greed} (${d.macro.fear_greed_label}) | <b>Bias:</b> ${d.macro.bias} (${d.macro.score.toFixed(2)})</div>` +
-        `<div style="margin-top:6px;">${d.macro.events.map(e => `• [${e.source}] ${e.headline}`).join('<br/>')}</div>`;
+    if (d.rule) {
+      document.getElementById('macroBox').textContent = d.rule.summary;
     }
 
     const posBody = document.getElementById('posBody');
@@ -983,12 +982,12 @@ async function refresh() {
       : 'No closed trades recorded yet.';
 
     document.getElementById('radarBody').innerHTML = (d.signals || []).map(s =>
-      `<tr><td>${s.pair}</td><td><b>${s.action}</b></td><td>${(s.conviction*100).toFixed(0)}%</td><td>${s.entry_price}</td><td>${s.stop_loss_price}</td><td>${s.take_profit_price}</td><td>${s.wick}</td><td>${s.depth_ratio}</td></tr>`
+      `<tr><td>${s.pair}</td><td><b>${s.action}</b></td><td>${s.close ?? '--'}</td><td>${s.breakout ?? '--'}</td><td>${s.gap_pct === null ? '--' : (s.gap_pct > 0 ? s.gap_pct + '%' : 'broken out')}</td><td>${s.stop_pct === null ? '--' : s.stop_pct + '%'}</td><td>${s.note}</td></tr>`
     ).join('');
 
     document.getElementById('capStatus').textContent = (d.capital_limit_jpy
       ? `Cap: ${fmtJpy(d.capital_limit_jpy)} (Live Equity: ${fmtJpy(d.equity_jpy)})`
-      : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`) + (d.allow_shorts === false ? ' • Spot Long-Only' : ' • Long + Short') + (d.force_profit_close_jpy ? ` • Auto TP: ${fmtJpy(d.force_profit_close_jpy)}` : '');
+      : `100% Account Equity (Live: ${fmtJpy(d.equity_jpy)})`) + (d.rule ? ` • ${d.rule.risk_per_trade_pct}% risk per trade, up to ${d.rule.max_positions} positions` : '');
     const capInput = document.getElementById('cfgCapJpy');
     capInput.placeholder = `Current Live: ${fmtJpy(d.equity_jpy)} (0 = use 100%)`;
     if (!capInput.dataset.dirty && document.activeElement !== capInput) {
@@ -1430,11 +1429,11 @@ function renderMarketChart() {
     if (stopPx > 0) addBox(stopPx, C.stop, 'SL', openPos.est_stop_pnl_jpy !== undefined ? yenSigned(openPos.est_stop_pnl_jpy) : '');
   } else if (pending) {
     const oc = pending.side === 'short' ? C.orderShort : C.orderLong;
-    addLevel(pending.planned_take_profit_price, C.tp, '2 4', 1);
+    if (pending.planned_take_profit_price > 0) addLevel(pending.planned_take_profit_price, C.tp, '2 4', 1);
     addLevel(pending.planned_stop_price, C.stop, '2 4', 1);
     addLevel(pending.price, oc, '', 1.4);
     addBox(pending.price, oc, `${pending.side === 'short' ? 'SELL' : 'BUY'} LIMIT`, String(pending.amount));
-    addBox(pending.planned_take_profit_price, C.tp, 'TP plan', yenSigned(pending.est_tp_pnl_jpy));
+    if (pending.planned_take_profit_price > 0) addBox(pending.planned_take_profit_price, C.tp, 'TP plan', yenSigned(pending.est_tp_pnl_jpy));
     addBox(pending.planned_stop_price, C.stop, 'SL plan', yenSigned(pending.est_stop_pnl_jpy));
   }
 
@@ -1568,7 +1567,7 @@ function renderMarketChart() {
       html += chip('Last', fmtPx(lastPx));
       html += chip('Unrealized', `${yenSigned(upnl)} (${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(2)}%)`, upnl >= 0 ? C.tp : C.stop);
       html += chip('Stop loss', stopPx > 0 ? `${fmtPx(stopPx)}${openPos.est_stop_pnl_jpy !== undefined ? ' · ' + yenSigned(openPos.est_stop_pnl_jpy) : ''}` : 'NOT SET', C.stop);
-      html += chip('Take profit', tpPx > 0 ? `${fmtPx(tpPx)}${openPos.est_tp_pnl_jpy !== undefined ? ' · ' + yenSigned(openPos.est_tp_pnl_jpy) : ''}` : '--', C.tp);
+      html += chip(tpPx > 0 ? 'Take profit' : 'Exit', tpPx > 0 ? `${fmtPx(tpPx)}${openPos.est_tp_pnl_jpy !== undefined ? ' · ' + yenSigned(openPos.est_tp_pnl_jpy) : ''}` : (openPos.owner === 'manual' ? 'manual position: the bot only keeps a stop on it' : 'trailing stop (no fixed target)'), C.tp);
       if (stopPx > 0 && tpPx > 0 && Math.abs(stopPx - entryPx) > 0) {
         html += chip('Reward : risk', (Math.abs(entryPx - tpPx) / Math.abs(stopPx - entryPx)).toFixed(2) + ' : 1');
       }
@@ -1578,7 +1577,7 @@ function renderMarketChart() {
       html += chip('Pending order', `${pending.side === 'short' ? 'SELL' : 'BUY'} LIMIT ${pending.amount}`, oc);
       html += chip('Order price', `${fmtPx(pending.price)} (${dist >= 0 ? '+' : ''}${dist.toFixed(2)}% from last)`);
       html += chip('Planned stop', `${fmtPx(pending.planned_stop_price)} · ${yenSigned(pending.est_stop_pnl_jpy)}`, C.stop);
-      html += chip('Planned target', `${fmtPx(pending.planned_take_profit_price)} · ${yenSigned(pending.est_tp_pnl_jpy)}`, C.tp);
+      if (pending.planned_take_profit_price > 0) html += chip('Planned target', `${fmtPx(pending.planned_take_profit_price)} · ${yenSigned(pending.est_tp_pnl_jpy)}`, C.tp);
     }
     info.innerHTML = html;
     info.style.display = html ? 'flex' : 'none';

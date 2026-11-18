@@ -311,6 +311,9 @@ class MockBitbankClient:
         elif position_side == "long" and side == "sell":
             # Closing margin long
             self._update_margin_position(pair, "long", delta_amount=-qty, fill_price=fill_price)
+        elif position_side in ("long", "short"):
+            # Market order that opens or adds to a margin position
+            self._update_margin_position(pair, position_side, delta_amount=qty, fill_price=fill_price)
         elif side == "sell":
             # Spot stop exit
             base_coin = pair.split("_")[0]
@@ -351,7 +354,7 @@ class MockBitbankClient:
             pos["average_price"] = f"{new_avg:.4f}"
         else:
             # Decreasing / covering position
-            covered = abs(delta_amount)
+            covered = min(abs(delta_amount), current_amt)   # a closing order cannot close more than is open
             new_amt = max(0.0, current_amt - covered)
             pnl = 0.0
             if side == "short":

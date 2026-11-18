@@ -1,21 +1,19 @@
-"""FastAPI Live Control Server & Real-Time Web Dashboard for Bitbank Trading Bot.
+"""Control server and web dashboard for the Bitbank trading bot.
 
-Provides:
-- Background TradingOrchestrator loop (10s ticks) with pause/resume control
-- Real-time JSON API (/api/status, /api/pause, /api/resume, /api/emergency-stop, /health)
-- Interactive Dark-Mode Web Dashboard (/) with live Equity Graph, Capital Milestones,
-  Active Positions & Stops, 5-Pair Radar, Macro News Catalyst, Loss-Learner Lessons,
-  and a BIG RED "STOP ALL TRADES" emergency kill switch.
+- runs the trading engine (engine.py) in a background thread, with pause / resume / emergency stop;
+- JSON API: /api/status, /api/candles, /api/pause, /api/resume, /api/emergency-stop, /api/close-position,
+  /api/config, /api/tax, /health;
+- the web dashboard at / (dashboard_html.py), behind an optional login.
 """
 
 import argparse
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 import secrets
 import threading
@@ -29,10 +27,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 import uvicorn
 
-from tradingbot.bitbank import Bitbank
+from tradingbot.bitbank import Bitbank, BitbankError
 from tradingbot.dashboard_html import DASHBOARD_HTML, render_login_html
-from tradingbot.models import MARGIN_PAIRS, PairConfig, SPOT_ONLY_PAIRS, SUPPORTED_PAIRS
-from tradingbot.orchestrator import TradingOrchestrator
+from tradingbot.engine import Engine, PAIRS, Settings, floor_amount, fmt_amount
 from tradingbot.tax_japan import (
     build_tax_report,
     load_tax_profile,
@@ -124,13 +121,14 @@ class TaxProfileRequest(BaseModel):
 
 
 class BotController:
-    """Thread-safe controller wrapping TradingOrchestrator + equity history + emergency stop."""
+    """Thread-safe wrapper around the trading engine: settings, equity history, pause and emergency stop."""
 
     MAX_HISTORY_POINTS = 500
+    HISTORY_EVERY_SEC = 300.0
 
     def __init__(
         self,
-        orchestrator: TradingOrchestrator,
+        engine: Engine,
         history_path: str = "equity_history.json",
         config_path: str = "bot_config.json",
         env_path: str = ".env",
@@ -138,7 +136,7 @@ class BotController:
         trade_log_path: str = "trade_audit_log.json",
         auto_start: bool = True,
     ):
-        self.orchestrator = orchestrator
+        self.engine = engine
         self.history_path = history_path
         self.config_path = config_path
         self.env_path = env_path
@@ -154,11 +152,14 @@ class BotController:
         self.equity_history: List[Dict[str, Any]] = []
         self.trade_audit: List[Dict[str, Any]] = []
         self._last_sync_ts: float = 0.0
+        self._last_history_ts: float = 0.0
+        self._candle_cache: Dict[Any, Any] = {}
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._load_history()
         self._load_config()
         self._load_trade_audit()
+        self.engine.entries_enabled = self.running and not self.emergency_stopped
 
     def _load_config(self) -> None:
         if not self.config_path or not os.path.exists(self.config_path):
@@ -166,33 +167,27 @@ class BotController:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            cap = cfg.get("capital_limit_jpy")
-            if cap is not None and float(cap) > 0:
-                self.orchestrator.capital_limit_jpy = float(cap)
-            base = cfg.get("baseline_jpy")
-            if base is not None and float(base) > 0:
-                bval = float(base)
-                self.orchestrator.baseline_budget_jpy = bval
-                self.orchestrator.position_reviewer.baseline_budget_jpy = bval
-            goal = cfg.get("goal_target_jpy")
-            if goal is not None and float(goal) > 0:
-                self.goal_target_jpy = float(goal)
-            if "allow_shorts" in cfg and cfg["allow_shorts"] is not None:
-                self.orchestrator.allow_shorts = bool(cfg["allow_shorts"])
-            fpc = cfg.get("force_profit_close_jpy")
-            if fpc is not None and float(fpc) > 0:
-                self.orchestrator.force_profit_close_jpy = float(fpc)
-            if "allow_counter_trend_longs" in cfg and cfg["allow_counter_trend_longs"] is not None:
-                val = bool(cfg["allow_counter_trend_longs"])
-                self.orchestrator.allow_counter_trend_longs = val
-                self.orchestrator.directional_strategist.allow_counter_trend_longs = val
-            self.orchestrator.scale_in = bool(cfg.get("scale_in", False))
-            self.orchestrator.run_winners = bool(cfg.get("run_winners", False))
-            self.orchestrator.set_sizing_overrides(
-                leverage=cfg.get("leverage_factor"), max_risk_pct=cfg.get("max_risk_pct_per_trade")
-            )
-            floor = cfg.get("equity_floor_jpy")
-            self.orchestrator.equity_floor_jpy = float(floor) if floor is not None and float(floor) > 0 else None
+            s = self.engine.settings
+
+            def positive(key: str) -> Optional[float]:
+                v = cfg.get(key)
+                return float(v) if v is not None and float(v) > 0 else None
+
+            s.capital_limit_jpy = positive("capital_limit_jpy")
+            s.equity_floor_jpy = positive("equity_floor_jpy")
+            if positive("baseline_jpy"):
+                s.baseline_jpy = positive("baseline_jpy")
+            self.goal_target_jpy = positive("goal_target_jpy")
+            risk, slots = positive("risk_per_trade_pct"), positive("max_positions")
+            if risk and risk <= 5.0:
+                self.engine.params = replace(self.engine.params, risk_per_trade=risk / 100.0)
+            if slots and slots <= 5:
+                self.engine.params = replace(self.engine.params, max_positions=int(slots))
+            # A pause or an emergency stop survives a restart: trading resumes only when the operator says so
+            if cfg.get("emergency_stopped"):
+                self.emergency_stopped, self.running = True, False
+            elif cfg.get("trading_enabled") is False:
+                self.running = False
         except Exception as e:
             logger.warning(f"Could not load bot config: {e}")
 
@@ -200,20 +195,18 @@ class BotController:
         if not self.config_path:
             return
         try:
+            s = self.engine.settings
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
-                        "capital_limit_jpy": self.orchestrator.capital_limit_jpy,
-                        "baseline_jpy": self.orchestrator.baseline_budget_jpy,
+                        "baseline_jpy": s.baseline_jpy,
+                        "capital_limit_jpy": s.capital_limit_jpy,
                         "goal_target_jpy": self.goal_target_jpy,
-                        "allow_shorts": self.orchestrator.allow_shorts,
-                        "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
-                        "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
-                        "scale_in": self.orchestrator.scale_in,
-                        "run_winners": self.orchestrator.run_winners,
-                        "equity_floor_jpy": self.orchestrator.equity_floor_jpy,
-                        "leverage_factor": self.orchestrator._leverage_override,
-                        "max_risk_pct_per_trade": self.orchestrator._max_risk_override,
+                        "equity_floor_jpy": s.equity_floor_jpy,
+                        "risk_per_trade_pct": round(self.engine.params.risk_per_trade * 100.0, 3),
+                        "max_positions": self.engine.params.max_positions,
+                        "trading_enabled": self.running,
+                        "emergency_stopped": self.emergency_stopped,
                     },
                     f,
                     indent=2,
@@ -228,12 +221,11 @@ class BotController:
         capital_limit_jpy: Optional[float] = None,
         baseline_jpy: Optional[float] = None,
         goal_target_jpy: Optional[float] = None,
-        allow_shorts: Optional[bool] = None,
-        force_profit_close_jpy: Optional[float] = None,
-        allow_counter_trend_longs: Optional[bool] = None,
+        **_ignored: Any,
     ) -> Dict[str, Any]:
-        """Update Bitbank API credentials, capital limit, baseline, goal, and/or short mode live."""
+        """Update the Bitbank API credentials, capital limit, baseline and/or goal while running."""
         changed: List[str] = []
+        s = self.engine.settings
         with self.lock:
             if api_key and api_secret:
                 key_clean = api_key.strip()
@@ -241,70 +233,32 @@ class BotController:
                 os.environ["API_KEY"] = key_clean
                 os.environ["SECRET_KEY"] = sec_clean
                 _save_env_keys(self.env_path, key_clean, sec_clean)
-                new_client = Bitbank(key=key_clean, secret=sec_clean)
-                orch = self.orchestrator
-                orch.client = new_client
-                orch.position_reviewer.client = new_client
-                orch.trend_analyst.client = new_client
-                orch.wick_analyst.client = new_client
-                orch.tech_analyst.client = new_client
-                orch.directional_strategist.client = new_client
-                orch.risk_manager.client = new_client
+                self.engine.client = Bitbank(key=key_clean, secret=sec_clean)
                 changed.append("api_credentials")
 
             if capital_limit_jpy is not None:
-                if capital_limit_jpy > 0:
-                    cap_val = float(capital_limit_jpy)
-                    self.orchestrator.capital_limit_jpy = cap_val
-                    if baseline_jpy is None:
-                        self.orchestrator.baseline_budget_jpy = cap_val
-                        self.orchestrator.position_reviewer.baseline_budget_jpy = cap_val
-                else:
-                    self.orchestrator.capital_limit_jpy = None
-                self._save_config()
+                s.capital_limit_jpy = float(capital_limit_jpy) if capital_limit_jpy > 0 else None
+                if s.capital_limit_jpy and baseline_jpy is None:
+                    s.baseline_jpy = s.capital_limit_jpy
                 changed.append("capital_limit_jpy")
 
             if baseline_jpy is not None and baseline_jpy > 0:
-                bval = float(baseline_jpy)
-                self.orchestrator.baseline_budget_jpy = bval
-                self.orchestrator.position_reviewer.baseline_budget_jpy = bval
-                self.orchestrator._peak_equity_jpy = bval
-                self._save_config()
+                s.baseline_jpy = float(baseline_jpy)
                 changed.append("baseline_jpy")
 
             if goal_target_jpy is not None:
                 self.goal_target_jpy = float(goal_target_jpy) if goal_target_jpy > 0 else None
-                self._save_config()
                 changed.append("goal_target_jpy")
 
-            if allow_shorts is not None:
-                self.orchestrator.allow_shorts = bool(allow_shorts)
+            if changed:
                 self._save_config()
-                changed.append("allow_shorts")
-
-            if force_profit_close_jpy is not None:
-                self.orchestrator.force_profit_close_jpy = (
-                    float(force_profit_close_jpy) if force_profit_close_jpy > 0 else None
-                )
-                self._save_config()
-                changed.append("force_profit_close_jpy")
-
-            if allow_counter_trend_longs is not None:
-                val = bool(allow_counter_trend_longs)
-                self.orchestrator.allow_counter_trend_longs = val
-                self.orchestrator.directional_strategist.allow_counter_trend_longs = val
-                self._save_config()
-                changed.append("allow_counter_trend_longs")
 
         return {
             "ok": True,
             "updated": changed,
-            "capital_limit_jpy": self.orchestrator.capital_limit_jpy,
-            "baseline_jpy": self.orchestrator.baseline_budget_jpy,
+            "capital_limit_jpy": s.capital_limit_jpy,
+            "baseline_jpy": s.baseline_jpy,
             "goal_target_jpy": self.goal_target_jpy,
-            "allow_shorts": self.orchestrator.allow_shorts,
-            "force_profit_close_jpy": self.orchestrator.force_profit_close_jpy,
-            "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
         }
 
     def remove_api_key(self) -> Dict[str, Any]:
@@ -316,14 +270,7 @@ class BotController:
             new_client = Bitbank(key="", secret="")
             new_client.key = None
             new_client.secret = None
-            orch = self.orchestrator
-            orch.client = new_client
-            orch.position_reviewer.client = new_client
-            orch.trend_analyst.client = new_client
-            orch.wick_analyst.client = new_client
-            orch.tech_analyst.client = new_client
-            orch.directional_strategist.client = new_client
-            orch.risk_manager.client = new_client
+            self.engine.client = new_client
         return {"ok": True, "api_key_configured": False}
 
     def _load_history(self) -> None:
@@ -367,11 +314,11 @@ class BotController:
             logger.warning(f"Could not save trade audit log: {e}")
 
     def sync_exchange_trades(self) -> int:
-        """Sync recent Bitbank fills (including manual trades while paused/off) into local audit log."""
+        """Sync recent Bitbank fills (bot and manual) into the local audit log."""
         with self.lock:
-            client = self.orchestrator.client
-            dry_run = self.orchestrator.dry_run
-            lessons = list(self.orchestrator.loss_learner.lessons) if self.orchestrator.loss_learner else []
+            client = self.engine.client
+            dry_run = self.engine.dry_run
+            bot_closes = [(str(j.get("pair")), float(j.get("timestamp") or 0.0)) for j in self.engine.journal]
         if dry_run or client is None or not getattr(client, "key", None):
             return 0
         try:
@@ -384,10 +331,6 @@ class BotController:
             return 0
 
         jst = timezone(timedelta(hours=9))
-        bot_closes = [
-            (l.pair, float(l.timestamp))
-            for l in lessons
-        ]
         added = 0
         with self.lock:
             seen_ids = {str(x.get("trade_id")) for x in self.trade_audit if x.get("trade_id") is not None}
@@ -411,7 +354,7 @@ class BotController:
                 net_pnl = round(raw_pnl - fee_q - interest, 2) if (pos_side and is_close) else 0.0
                 ts_ms = int(t.get("executed_at") or 0)
                 ts_sec = int(ts_ms / 1000) if ts_ms > 0 else int(time.time())
-                is_bot = any(bp == pair and abs(bts - ts_sec) <= 25 for bp, bts in bot_closes)
+                is_bot = any(bp == pair and abs(bts - ts_sec) <= 90 for bp, bts in bot_closes)
                 self.trade_audit.append({
                     "trade_id": tid,
                     "ts": ts_sec,
@@ -442,7 +385,7 @@ class BotController:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="OrchestratorLoop")
+        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="EngineLoop")
         self._thread.start()
 
     def stop_loop(self) -> None:
@@ -453,136 +396,76 @@ class BotController:
     def _run_loop(self) -> None:
         self.sync_exchange_trades()
         while not self._stop_event.is_set():
-            now = time.time()
-            if self.running and not self.emergency_stopped:
-                try:
-                    res = self.orchestrator.tick()
-                    eq = float(res.get("equity_jpy", self.orchestrator.baseline_budget_jpy))
-                    now = time.time()
-                    with self.lock:
-                        self.last_tick_ts = now
-                        self.last_error = None
-                        self.equity_history.append({"ts": int(now), "equity": round(eq, 2)})
-                        if len(self.equity_history) > self.MAX_HISTORY_POINTS:
-                            self.equity_history = self.equity_history[-self.MAX_HISTORY_POINTS:]
+            # The engine ticks even while paused or stopped: it then opens nothing new, but open positions
+            # keep their exchange stops (and the bot's own positions keep trailing).
+            self.engine.entries_enabled = self.running and not self.emergency_stopped
+            try:
+                res = self.engine.tick()
+                now = time.time()
+                with self.lock:
+                    self.last_tick_ts = now
+                    self.last_error = None
+                    if now - self._last_history_ts >= self.HISTORY_EVERY_SEC:
+                        self._last_history_ts = now
+                        self.equity_history.append({"ts": int(now), "equity": round(float(res["equity_jpy"]), 2)})
+                        self.equity_history = self.equity_history[-self.MAX_HISTORY_POINTS:]
                         self._save_history()
-                    if now - self._last_sync_ts >= 60.0:
-                        self.sync_exchange_trades()
-                except Exception as e:
-                    logger.error(f"Server tick error: {e}", exc_info=True)
-                    with self.lock:
-                        self.last_error = str(e)
-            elif not self.emergency_stopped and (now - self._last_sync_ts >= 60.0):
-                # Keep equity curve & manual Bitbank trades synced even while bot is PAUSED
-                try:
-                    if not self.orchestrator.dry_run and getattr(self.orchestrator.client, "key", None):
-                        rev = self.orchestrator.position_reviewer.review()
-                        self.orchestrator.last_review = rev
-                        eq = float(rev.total_equity_jpy)
-                        with self.lock:
-                            self.equity_history.append({"ts": int(now), "equity": round(eq, 2)})
-                            if len(self.equity_history) > self.MAX_HISTORY_POINTS:
-                                self.equity_history = self.equity_history[-self.MAX_HISTORY_POINTS:]
-                            self._save_history()
+                if now - self._last_sync_ts >= 60.0:
                     self.sync_exchange_trades()
-                except Exception as e:
-                    logger.debug(f"Paused sync skipped: {e}")
-                    with self.lock:
-                        self._last_sync_ts = time.time()
-            self._stop_event.wait(self.orchestrator.TICK_INTERVAL_SEC)
+            except Exception as e:
+                with self.lock:
+                    repeated = self.last_error == str(e)
+                    self.last_error = str(e)
+                if not repeated:
+                    logger.error(f"Engine tick failed: {e}", exc_info=not isinstance(e, BitbankError))
+            self._stop_event.wait(self.engine.TICK_INTERVAL_SEC)
 
     def pause(self) -> Dict[str, Any]:
         with self.lock:
             self.running = False
-            self._last_sync_ts = 0.0
+            self._save_config()
         return {"status": "PAUSED", "running": self.running}
 
     def resume(self) -> Dict[str, Any]:
         with self.lock:
             self.emergency_stopped = False
-            self.orchestrator._circuit_breaker_until = 0.0
-            self.orchestrator._global_cooldown_until = 0.0
             self.running = True
-            self._last_sync_ts = 0.0
+            self._save_config()
         return {"status": "RUNNING", "running": self.running}
 
     def emergency_stop_all(self) -> Dict[str, Any]:
-        """Immediately halt the bot, cancel all active orders, and close all open margin positions."""
+        """Halt new entries, cancel every active order and close every open position at market."""
         with self.lock:
             self.running = False
             self.emergency_stopped = True
+            self._save_config()
+        self.engine.entries_enabled = False
 
         cancelled: List[Dict[str, Any]] = []
         closed: List[Dict[str, Any]] = []
         errors: List[str] = []
-        client = self.orchestrator.client
+        client = self.engine.client
 
-        if not self.orchestrator.dry_run and client is not None:
-            for pair in SUPPORTED_PAIRS:
-                try:
-                    orders = client._get("/user/spot/active_orders", {"pair": pair}).get("orders", [])
-                    for o in orders:
-                        oid = o.get("order_id")
-                        if oid is not None:
-                            client.cancel(pair, oid)
-                            cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
-                except Exception as e:
-                    errors.append(f"Cancel error on {pair}: {e}")
-
+        if not self.engine.dry_run and client is not None:
             try:
-                for p in client.margin_positions():
-                    amt = float(p.get("open_amount", 0.0))
-                    if amt > 0.0001:
-                        pair = p["pair"]
-                        side = p["position_side"]
-                        close_side = "buy" if side == "short" else "sell"
-                        res = client.order(
-                            pair,
-                            side=close_side,
-                            amount=p["open_amount"],
-                            type_="market",
-                            position_side=side,
-                        )
-                        closed.append({
-                            "pair": pair,
-                            "side": side,
-                            "amount": p["open_amount"],
-                            "order_id": res.get("order_id"),
-                        })
-            except Exception as e:
-                errors.append(f"Position close error: {e}")
-
-            try:
-                assets_res = client._get("/user/assets").get("assets", [])
-                for a in assets_res:
-                    asset = a.get("asset", "")
-                    pair = f"{asset}_jpy"
-                    if pair not in SUPPORTED_PAIRS:
-                        continue
-                    free_amt = float(a.get("free_amount", 0.0))
-                    if free_amt <= 0.0001:
+                for o in client._get("/user/spot/active_orders").get("orders", []):
+                    oid, pair = o.get("order_id"), o.get("pair")
+                    if oid is None or not pair:
                         continue
                     try:
-                        last_px = float((client.ticker(pair) or {}).get("last", 0.0))
-                    except Exception:
-                        last_px = 0.0
-                    if free_amt * last_px >= 500.0:
-                        cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair) or PairConfig(pair=pair, price_digits=3, amount_digits=4)
-                        scale = 10 ** cfg.amount_digits
-                        floored_amt = math.floor(free_amt * scale) / scale
-                        if floored_amt > 0:
-                            amt_str = f"{floored_amt:.{cfg.amount_digits}f}"
-                            res = client.order(pair, side="sell", amount=amt_str, type_="market")
-                            closed.append({"pair": pair, "side": "spot", "amount": amt_str, "order_id": res.get("order_id")})
+                        client.cancel(pair, oid)
+                        cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
+                    except Exception as e:
+                        errors.append(f"Cancel error on {pair} #{oid}: {e}")
             except Exception as e:
-                errors.append(f"Spot close error: {e}")
-
-            for pair in SUPPORTED_PAIRS:
-                mgr = self.orchestrator.risk_manager.get_sync_manager(pair, client)
-                mgr.current_stop_id = None
-                mgr.current_stop_level = None
-                mgr.current_stop_qty = None
-                self.orchestrator.position_reviewer.spot_entry_prices.pop(pair, None)
+                errors.append(f"Could not list active orders: {e}")
+            closed_now, close_errors = self._close_margin(client)
+            closed += closed_now
+            errors += close_errors
+            closed_now, close_errors = self._sell_spot(client, list(PAIRS))
+            closed += closed_now
+            errors += close_errors
+            self.engine.entries.clear()
 
         report = {
             "status": "EMERGENCY_STOPPED",
@@ -596,80 +479,74 @@ class BotController:
         logger.critical(f"EMERGENCY STOP ALL EXECUTED: {report}")
         return report
 
+    @staticmethod
+    def _close_margin(client: Any, pair: Optional[str] = None, side: Optional[str] = None):
+        closed: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        try:
+            for p in client.margin_positions():
+                if float(p.get("open_amount", 0.0)) <= 0.00005:
+                    continue
+                if (pair and p.get("pair") != pair) or (side and p.get("position_side") != side):
+                    continue
+                p_side = p["position_side"]
+                try:
+                    res = client.order(p["pair"], side="buy" if p_side == "short" else "sell",
+                                       amount=p["open_amount"], type_="market", position_side=p_side)
+                    closed.append({"pair": p["pair"], "side": p_side, "amount": p["open_amount"],
+                                   "order_id": res.get("order_id")})
+                except Exception as e:
+                    errors.append(f"Close error on {p['pair']} {p_side}: {e}")
+        except Exception as e:
+            errors.append(f"Could not read margin positions: {e}")
+        return closed, errors
+
+    @staticmethod
+    def _sell_spot(client: Any, pairs: List[str]):
+        closed: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        try:
+            for a in client._get("/user/assets").get("assets", []):
+                pair = f"{a.get('asset', '')}_jpy"
+                free_amt = float(a.get("free_amount", 0.0))
+                if pair not in pairs or free_amt <= 0.0001:
+                    continue
+                last_px = float((client.ticker(pair) or {}).get("last", 0.0))
+                amount = floor_amount(pair, free_amt)
+                if amount * last_px >= 500.0:
+                    res = client.order(pair, side="sell", amount=fmt_amount(pair, amount), type_="market")
+                    closed.append({"pair": pair, "side": "spot", "amount": fmt_amount(pair, amount),
+                                   "order_id": res.get("order_id")})
+        except Exception as e:
+            errors.append(f"Spot close error: {e}")
+        return closed, errors
+
     def close_position(self, pair: str, position_side: Optional[str] = None) -> Dict[str, Any]:
         """Cancel active orders for a pair and market-close the open position."""
-        if pair not in SUPPORTED_PAIRS:
+        if pair not in PAIRS:
             raise HTTPException(status_code=400, detail=f"Unsupported pair: {pair}")
 
         cancelled: List[Dict[str, Any]] = []
         closed: List[Dict[str, Any]] = []
         errors: List[str] = []
-        client = self.orchestrator.client
+        client = self.engine.client
 
-        if not self.orchestrator.dry_run and client is not None:
+        if not self.engine.dry_run and client is not None:
             try:
-                orders = client._get("/user/spot/active_orders", {"pair": pair}).get("orders", [])
-                for o in orders:
+                for o in client._get("/user/spot/active_orders", {"pair": pair}).get("orders", []):
                     oid = o.get("order_id")
                     if oid is not None:
                         client.cancel(pair, oid)
                         cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
             except Exception as e:
                 errors.append(f"Cancel error on {pair}: {e}")
-
-            try:
-                for p in client.margin_positions():
-                    amt = float(p.get("open_amount", 0.0))
-                    p_side = p.get("position_side")
-                    if p.get("pair") == pair and amt > 0.0001:
-                        if position_side and p_side != position_side:
-                            continue
-                        close_side = "buy" if p_side == "short" else "sell"
-                        res = client.order(
-                            pair,
-                            side=close_side,
-                            amount=p["open_amount"],
-                            type_="market",
-                            position_side=p_side,
-                        )
-                        closed.append({
-                            "pair": pair,
-                            "side": p_side,
-                            "amount": p["open_amount"],
-                            "order_id": res.get("order_id"),
-                        })
-            except Exception as e:
-                errors.append(f"Margin close error on {pair}: {e}")
-
-            # Also handle spot-only / spot long balances if no margin position was closed
-            if not closed and (position_side in (None, "spot", "long")):
-                try:
-                    base_asset = pair.split("_")[0]
-                    assets_res = client._get("/user/assets").get("assets", [])
-                    for a in assets_res:
-                        if a.get("asset") == base_asset:
-                            free_amt = float(a.get("free_amount", 0.0))
-                            if free_amt > 0.0001:
-                                cfg = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair) or PairConfig(pair=pair, price_digits=3, amount_digits=4)
-                                scale = 10 ** cfg.amount_digits
-                                floored_amt = math.floor(free_amt * scale) / scale
-                                if floored_amt > 0:
-                                    amt_str = f"{floored_amt:.{cfg.amount_digits}f}"
-                                    res = client.order(pair, side="sell", amount=amt_str, type_="market")
-                                    closed.append({
-                                        "pair": pair,
-                                        "side": "spot",
-                                        "amount": amt_str,
-                                        "order_id": res.get("order_id"),
-                                    })
-                except Exception as e:
-                    errors.append(f"Spot close error on {pair}: {e}")
-
-            mgr = self.orchestrator.risk_manager.get_sync_manager(pair, client)
-            mgr.current_stop_id = None
-            mgr.current_stop_level = None
-            mgr.current_stop_qty = None
-            self.orchestrator.position_reviewer.spot_entry_prices.pop(pair, None)
+            side = position_side if position_side in ("long", "short") else None
+            closed, close_errors = self._close_margin(client, pair, side)
+            errors += close_errors
+            if not closed and position_side in (None, "spot", "long"):
+                closed, close_errors = self._sell_spot(client, [pair])
+                errors += close_errors
+            self.engine.entries.pop(pair, None)
 
         logger.warning(f"MANUAL CLOSE EXECUTED on {pair} ({position_side}): closed={closed}, cancelled={cancelled}, errors={errors}")
         return {
@@ -682,75 +559,67 @@ class BotController:
         }
 
     def get_status(self) -> Dict[str, Any]:
-        orch = self.orchestrator
-        rev = orch.last_review
-        baseline = orch.baseline_budget_jpy
-        equity = float(rev.total_equity_jpy) if rev else baseline
-        free_cash = float(rev.free_cash_jpy) if rev else baseline
-        buying_power = float(rev.buying_power_jpy) if rev else equity * 2.0
+        eng = self.engine
+        acct = eng.account
+        s = eng.settings
+        baseline = s.baseline_jpy
+        equity = acct.equity if acct else baseline
+        free_cash = acct.free_jpy if acct else baseline
         total_pnl = equity - baseline
         total_pnl_pct = (total_pnl / baseline * 100.0) if baseline > 0 else 0.0
 
-        open_positions = [dict(p) for p in (rev.open_positions if rev else [])]
-        active_stops = rev.active_stops if rev else []
-        in_trade_pnl = 0.0
-        in_trade_notional = 0.0
-        in_trade_est_net = 0.0
-        for p in open_positions:
-            upnl = float(p.get("unrealized_pnl_jpy", 0.0))
-            notional = float(p.get("notional_jpy", 0.0))
-            amt = float(p.get("amount", p.get("open_amount", 0.0)))
-            avg_px = float(p.get("avg_price", p.get("average_price", 0.0)))
-            p_side = p.get("position_side", "short")
-
+        orders = list(acct.orders) if acct else []
+        active_stops = [o for o in orders if o.get("type") == "stop"]
+        open_positions: List[Dict[str, Any]] = []
+        in_trade_pnl = in_trade_notional = in_trade_est_net = 0.0
+        for (pair, side), pos in (acct.positions.items() if acct else []):
+            notional = pos.amount * pos.last
             est_fee = round(notional * 0.0012, 2)
-            est_net = round(upnl - est_fee, 2)
-            p["est_close_fee_jpy"] = est_fee
-            p["est_net_close_pnl_jpy"] = est_net
-
-            match_stop = next(
-                (s for s in active_stops if s.get("pair") == p.get("pair") and s.get("position_side") == p_side),
-                None,
-            )
-            if match_stop and amt > 0 and avg_px > 0:
-                trig = float(match_stop.get("trigger_price", 0.0))
-                if trig > 0:
-                    stop_gross = amt * (avg_px - trig) if p_side == "short" else amt * (trig - avg_px)
-                    stop_fee = amt * trig * 0.0012
-                    p["stop_trigger_price"] = trig
-                    p["est_stop_pnl_jpy"] = round(stop_gross - stop_fee, 2)
-
-            # Take-profit level the orchestrator will act on, so the chart can draw it
-            strat = orch.directional_strategist
-            if amt > 0 and avg_px > 0:
-                if p_side == "short":
-                    tp_px = avg_px * (1.0 - strat.SHORT_TP_PCT)
-                elif p.get("pair") in SPOT_ONLY_PAIRS and orch.allow_counter_trend_longs:
-                    tp_px = avg_px * 1.012
-                else:
-                    tp_px = avg_px * (1.0 + strat.LONG_TP_PCT)
-                p["take_profit_price"] = round(tp_px, 4)
-                p["est_tp_pnl_jpy"] = round(amt * abs(avg_px - tp_px) - amt * tp_px * 0.0012, 2)
-
-            in_trade_pnl += upnl
+            est_net = round(pos.upnl - est_fee, 2)
+            row: Dict[str, Any] = {
+                "pair": pair,
+                "position_side": side,
+                "open_amount": f"{pos.amount:.4f}",
+                "amount": pos.amount,
+                "average_price": f"{pos.avg:.4f}",
+                "avg_price": pos.avg,
+                "last_price": pos.last,
+                "unrealized_pnl_jpy": pos.upnl,
+                "notional_jpy": notional,
+                "est_close_fee_jpy": est_fee,
+                "est_net_close_pnl_jpy": est_net,
+                "owner": "bot" if (side == "long" and pair in eng.positions) else "manual",
+            }
+            close_side = "sell" if side == "long" else "buy"
+            trigs = [float(o.get("trigger_price") or 0.0) for o in active_stops
+                     if o.get("pair") == pair and o.get("position_side") == side and o.get("side") == close_side]
+            if trigs and pos.avg > 0:
+                trig = max(trigs) if side == "long" else min(trigs)
+                gross = pos.amount * ((trig - pos.avg) if side == "long" else (pos.avg - trig))
+                row["stop_trigger_price"] = trig
+                row["est_stop_pnl_jpy"] = round(gross - pos.amount * trig * 0.0012, 2)
+            open_positions.append(row)
+            in_trade_pnl += pos.upnl
             in_trade_notional += notional
             in_trade_est_net += est_net
         in_trade_pct = (in_trade_pnl / in_trade_notional * 100.0) if in_trade_notional > 0 else 0.0
 
-        # Resting entry orders with the stop / target they will get once filled
+        # Resting limit orders (the bot's maker buy, or the operator's own) with the stop they will get
         pending_orders = []
-        strat = orch.directional_strategist
-        for o in (getattr(rev, "active_orders", None) or []) if rev else []:
+        for o in orders:
             try:
                 if o.get("type") != "limit":
                     continue
                 o_px = float(o.get("price") or 0.0)
-                o_amt = float(o.get("remaining_amount") or o.get("start_amount") or o.get("amount") or 0.0)
+                o_amt = _order_amount(o)
                 if o_px <= 0 or o_amt <= 0:
                     continue
                 is_short = o.get("side") == "sell"
-                o_stop = o_px * (1.0 + strat.STOP_PCT) if is_short else o_px * (1.0 - strat.STOP_PCT)
-                o_tp = o_px * (1.0 - strat.SHORT_TP_PCT) if is_short else o_px * (1.0 + strat.LONG_TP_PCT)
+                entry = eng.entries.get(o.get("pair")) if not is_short else None
+                if entry is not None and entry.get("order_id") == o.get("order_id"):
+                    o_stop = float(entry["stop"])
+                else:
+                    o_stop = o_px * (1.0 + s.manual_stop_pct) if is_short else o_px * (1.0 - s.manual_stop_pct)
                 pending_orders.append({
                     "pair": o.get("pair"),
                     "order_id": o.get("order_id"),
@@ -758,9 +627,9 @@ class BotController:
                     "price": o_px,
                     "amount": o_amt,
                     "planned_stop_price": round(o_stop, 4),
-                    "planned_take_profit_price": round(o_tp, 4),
+                    "planned_take_profit_price": None,
                     "est_stop_pnl_jpy": round(-o_amt * abs(o_stop - o_px) - o_amt * o_stop * 0.0012, 2),
-                    "est_tp_pnl_jpy": round(o_amt * abs(o_px - o_tp) - o_amt * o_tp * 0.0012, 2),
+                    "est_tp_pnl_jpy": None,
                 })
             except (TypeError, ValueError):
                 continue
@@ -782,62 +651,30 @@ class BotController:
             pct = min(100.0, max(0.0, (equity - baseline) / req * 100.0))
             return {"target": target, "pct": round(pct, 1), "remaining": round(max(0.0, target - equity), 2)}
 
-        signals_out = []
-        for pair, sig in (orch.last_signals or {}).items():
-            signals_out.append({
-                "pair": pair,
-                "action": sig.action,
-                "conviction": sig.conviction,
-                "entry_price": sig.entry_price,
-                "stop_loss_price": sig.stop_loss_price,
-                "take_profit_price": sig.take_profit_price,
-                "alignment": str(getattr(sig, "trend_alignment", "")),
-                "wick": str(getattr(sig, "wick_classification", "")),
-                "depth_ratio": round(float(getattr(sig, "depth_ratio", 1.0)), 2),
-            })
-
-        macro = orch.last_macro_report
-        macro_out = None
-        if macro is not None:
-            macro_out = {
-                "fear_greed": macro.fear_and_greed_value,
-                "fear_greed_label": macro.fear_and_greed_label,
-                "bias": macro.catalyst_bias,
-                "score": macro.catalyst_score,
-                "summary": macro.prediction_summary,
-                "events": [
-                    {"source": e.source, "headline": e.headline, "score": e.impact_score}
-                    for e in (macro.events or [])[:4]
-                ],
-            }
-
-        now = time.time()
-        cb_rem = max(0, int(orch._circuit_breaker_until - now))
-        cd_rem = max(0, int(orch._global_cooldown_until - now))
+        journal = list(eng.journal)
         lessons = [
             {
-                "pair": l.pair,
-                "side": l.side,
-                "pnl_jpy": l.pnl_jpy,
-                "pnl_pct": l.pnl_pct,
-                "cause": l.root_cause,
-                "fix": l.fix_applied,
-                "is_loss": l.is_loss,
+                "pair": j.get("pair"),
+                "side": j.get("side", "long"),
+                "pnl_jpy": j.get("pnl_jpy", 0.0),
+                "cause": f"{float(j.get('r') or 0.0):+.2f}R in {j.get('days', 0)} days",
+                "fix": j.get("reason", ""),
+                "is_loss": float(j.get("pnl_jpy") or 0.0) < 0,
             }
-            for l in (orch.loss_learner.lessons[-8:] if orch.loss_learner else [])
+            for j in journal[-8:]
         ]
         trade_history = [
             {
-                "pair": l.pair,
-                "side": l.side,
-                "pnl_jpy": round(float(l.pnl_jpy), 2),
-                "pnl_pct": round(float(l.pnl_pct), 2),
-                "equity_after": round(float(l.exit_equity_jpy), 2),
-                "is_loss": bool(l.is_loss),
-                "ts": int(l.timestamp),
+                "pair": j.get("pair"),
+                "side": j.get("side", "long"),
+                "pnl_jpy": round(float(j.get("pnl_jpy") or 0.0), 2),
+                "pnl_pct": round(float(j.get("r") or 0.0) * eng.params.risk_per_trade * 100.0, 2),
+                "equity_after": round(float(j.get("equity_after") or equity), 2),
+                "is_loss": float(j.get("pnl_jpy") or 0.0) < 0,
+                "ts": int(float(j.get("timestamp") or 0.0)),
                 "source": "bot",
             }
-            for l in (orch.loss_learner.lessons[-16:] if orch.loss_learner else [])
+            for j in journal[-16:]
         ]
 
         with self.lock:
@@ -856,7 +693,7 @@ class BotController:
             ts_row = int(row.get("ts") or 0)
             pair_row = str(row.get("pair") or "")
             existing = next(
-                (h for h in trade_history if h["pair"] == pair_row and abs(h["ts"] - ts_row) <= 25),
+                (h for h in trade_history if h["pair"] == pair_row and abs(h["ts"] - ts_row) <= 90),
                 None,
             )
             if existing is not None:
@@ -888,24 +725,23 @@ class BotController:
             err = self.last_error
             em_report = self.last_emergency_report
 
-        raw_key = getattr(orch.client, "key", None) or os.environ.get("API_KEY") or ""
+        raw_key = getattr(eng.client, "key", None) or os.environ.get("API_KEY") or ""
         api_key_masked = ("****" + raw_key[-4:]) if len(raw_key) >= 4 else ("SET" if raw_key else "NOT SET")
+        p = eng.params
+        days = p.channel_bars * 4 // 24
 
         return {
             "state": state_label,
-            "mode": orch.mode.upper(),
-            "tick_count": orch.tick_count,
+            "mode": eng.mode.upper(),
+            "tick_count": eng.tick_count,
             "api_key_configured": bool(raw_key),
             "api_key_masked": api_key_masked,
-            "capital_limit_jpy": orch.capital_limit_jpy,
+            "capital_limit_jpy": s.capital_limit_jpy,
             "baseline_jpy": round(baseline, 2),
             "goal_target_jpy": self.goal_target_jpy,
-            "allow_shorts": orch.allow_shorts,
-            "force_profit_close_jpy": orch.force_profit_close_jpy,
-            "allow_counter_trend_longs": orch.allow_counter_trend_longs,
             "equity_jpy": round(equity, 2),
             "free_cash_jpy": round(free_cash, 2),
-            "buying_power_jpy": round(buying_power, 2),
+            "buying_power_jpy": round(equity * p.max_notional * p.max_positions, 2),
             "total_pnl_jpy": round(total_pnl, 2),
             "total_pnl_pct": round(total_pnl_pct, 2),
             "in_trade_pnl_jpy": round(in_trade_pnl, 2),
@@ -915,20 +751,25 @@ class BotController:
             "open_positions": open_positions,
             "active_stops": active_stops,
             "pending_orders": pending_orders,
-            "signals": signals_out,
-            "macro": macro_out,
-            "circuit_breaker_sec": cb_rem,
-            "daily_loss_halted": bool(getattr(orch, "_daily_loss_halted", False)),
-            "news_override": getattr(orch, "news_override", None),
-            "scale_in": bool(getattr(orch, "scale_in", False)),
-            "run_winners": bool(getattr(orch, "run_winners", False)),
-            "equity_floor_jpy": getattr(orch, "equity_floor_jpy", None),
-            "equity_floor_hit": bool(getattr(orch, "equity_floor_hit", False)),
-            "leverage_factor": orch.risk_manager.SHORT_LEVERAGE_FACTOR,
-            "learner": orch.learner.summary()[:12],
-            "max_risk_pct_per_trade": orch.risk_manager.MAX_RISK_PCT_PER_TRADE,
-            "day_start_equity_jpy": round(float(getattr(orch, "_day_start_equity_jpy", 0.0) or 0.0), 2),
-            "cooldown_sec": cd_rem,
+            "signals": eng.watchlist(),
+            "rule": {
+                "summary": (f"Buys a coin when a 4-hour candle closes above its {days}-day high. The stop starts "
+                            f"{p.atr_mult:g} ATR below the entry and follows the price up; it never moves down. "
+                            f"Each trade risks {p.risk_per_trade * 100:g}% of equity, with at most {p.max_positions} "
+                            f"positions. Long only; there is no profit target."),
+                "risk_per_trade_pct": round(p.risk_per_trade * 100.0, 3),
+                "max_positions": p.max_positions,
+                "channel_days": days,
+                "atr_mult": p.atr_mult,
+            },
+            "entries_enabled": bool(eng.entries_enabled),
+            "equity_floor_jpy": s.equity_floor_jpy,
+            "equity_floor_hit": bool(eng.floor_hit),
+            "circuit_breaker_sec": 0,
+            "cooldown_sec": 0,
+            "daily_loss_halted": False,
+            "news_override": None,
+            "macro": None,
             "lessons": list(reversed(lessons)),
             "trade_history": trade_history,
             "equity_history": history,
@@ -937,29 +778,30 @@ class BotController:
         }
 
     def get_candles(self, pair: str = "btc_jpy", tf: str = "15min", limit: int = 200) -> Dict[str, Any]:
-        """Fetch OHLCV candles from Bitbank public API for the live chart."""
+        """Fetch OHLCV candles from Bitbank's public API for the live chart."""
         valid_tfs = {"5min", "15min", "1hour", "4hour"}
         tf_clean = tf if tf in valid_tfs else "15min"
-        pair_clean = pair if pair in SUPPORTED_PAIRS else "btc_jpy"
+        pair_clean = pair if pair in PAIRS else "btc_jpy"
         now_utc = datetime.now(timezone.utc)
+        if tf_clean == "4hour":
+            periods = [str(now_utc.year - 1), str(now_utc.year)]
+        else:
+            days_back = {"5min": 1, "15min": 3, "1hour": 9}.get(tf_clean, 1)
+            periods = [(now_utc - timedelta(days=d)).strftime("%Y%m%d") for d in range(days_back, -1, -1)]
         raw_rows: List[Any] = []
         try:
-            if tf_clean == "4hour":
-                raw_rows = self.orchestrator.client.candles(pair_clean, tf_clean, now_utc.strftime("%Y")) or []
-            else:
-                # Enough history for EMA50 / Bollinger / RSI warm-up plus the visible window
-                days_back = {"5min": 1, "15min": 3, "1hour": 9}.get(tf_clean, 1)
-                day_strs = [(now_utc - timedelta(days=d)).strftime("%Y%m%d") for d in range(days_back, -1, -1)]
-                analyst = self.orchestrator.trend_analyst
-                for day_str in day_strs:
+            for period in periods:
+                # Finished periods never change; only the current one is refetched (every 10 seconds at most)
+                ttl = 10.0 if period == periods[-1] else 6 * 3600.0
+                key = (pair_clean, tf_clean, period)
+                hit = self._candle_cache.get(key)
+                if hit is None or time.time() - hit[0] > ttl:
                     try:
-                        # Past days never change: reuse the analyst's TTL cache instead of refetching them
-                        ttl = 10.0 if day_str == day_strs[-1] else 3600.0
-                        raw_rows.extend(
-                            analyst._get_cached_or_fetch_rows(self.orchestrator.client, pair_clean, tf_clean, day_str, ttl) or []
-                        )
+                        hit = (time.time(), self.engine.client.candles(pair_clean, tf_clean, period) or [])
+                        self._candle_cache[key] = hit
                     except Exception:
-                        pass
+                        hit = hit or (0.0, [])
+                raw_rows.extend(hit[1])
             candles = []
             for row in raw_rows[-max(10, min(limit, 200)):]:
                 if len(row) >= 6:
@@ -981,8 +823,8 @@ class BotController:
             prof = load_tax_profile(self.tax_profile_path)
             if year is not None and year > 2000:
                 prof.tax_year = int(year)
-            client = self.orchestrator.client
-            lessons = list(self.orchestrator.loss_learner.lessons)
+            client = self.engine.client
+            lessons = list(self.engine.journal)
             cache_path = f"tax_cache_{prof.tax_year}.json" if self.tax_profile_path else ""
         return build_tax_report(client, prof, fallback_lessons=lessons, cache_path=cache_path)
 
@@ -1014,10 +856,14 @@ class BotController:
             if tax_office is not None:
                 prof.tax_office = tax_office.strip()[:80]
             save_tax_profile(prof, self.tax_profile_path)
-            client = self.orchestrator.client
-            lessons = list(self.orchestrator.loss_learner.lessons)
+            client = self.engine.client
+            lessons = list(self.engine.journal)
             cache_path = f"tax_cache_{prof.tax_year}.json" if self.tax_profile_path else ""
         return build_tax_report(client, prof, fallback_lessons=lessons, cache_path=cache_path)
+
+
+def _order_amount(order: Dict[str, Any]) -> float:
+    return float(order.get("remaining_amount") or order.get("start_amount") or order.get("amount") or 0.0)
 
 
 # DASHBOARD_HTML imported from tradingbot.dashboard_html
@@ -1280,10 +1126,9 @@ self.addEventListener('fetch', (e) => {
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bitbank FastAPI Control Server & Web Dashboard")
+    parser = argparse.ArgumentParser(description="Bitbank trading bot: engine, control API and web dashboard")
     parser.add_argument("--mode", choices=["live", "dry-run"], default="dry-run")
-    parser.add_argument("--baseline", type=float, default=98874.1)
-    parser.add_argument("--spot-only", action="store_true", help="Disable margin shorts (Spot Long-Only mode)")
+    parser.add_argument("--baseline", type=float, default=20000.0)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
@@ -1294,15 +1139,8 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     _load_env_file(".env")
-    orch = TradingOrchestrator(
-        baseline_budget_jpy=args.baseline,
-        mode=args.mode,
-        allow_shorts=not args.spot_only,
-        daily_state_path="daily_risk_state.json",
-        news_override_path="news_override.json",
-        learner_state_path="learner_state.json",
-    )
-    controller = BotController(orch, auto_start=True)
+    engine = Engine(mode=args.mode, settings=Settings(baseline_jpy=args.baseline))
+    controller = BotController(engine, auto_start=True)
     app = create_app(controller)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

@@ -30,6 +30,8 @@ bot_config.json
 tax_profile.json
 tax_cache_*.json
 trade_audit_log.json
+bot_state.json
+trade_journal.json
 state.json
 state_paper.json
 

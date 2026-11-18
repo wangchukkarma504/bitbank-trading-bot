@@ -1,44 +1,97 @@
-# Bitbank Autonomous Trading Bot & Dashboard
+# Bitbank Trend Bot & Dashboard
 
-An autonomous, regime-gated Spot Long and Margin Short trading system for the **Bitbank** exchange, powered by a FastAPI web dashboard, exchange-side stop protection, and a 3-role multi-agent execution pipeline.
-
----
-
-## Features
-
-- **10-Pair Market Radar:**
-  - **Margin Pairs (Long & Short):** `btc_jpy`, `eth_jpy`, `sol_jpy`, `doge_jpy`, `xrp_jpy`
-  - **Spot-Only Altcoins (Long Only):** `ada_jpy`, `link_jpy`, `avax_jpy`, `dot_jpy`, `ltc_jpy`
-- **Multi-Agent Architecture (`tradingbot/execution/`):**
-  - `DirectionalStrategist`: Scores macro/trend alignment (`15m`, `1h`, `4h`) and strictly gates `SHORT` signals to margin-eligible pairs.
-  - `RiskManager` & `StopSyncManager`: Handles spot/margin sizing, maker limit entries, exchange-side `stop` orders, trailing stop ratchets, and automatic partial-stop deduplication.
-  - `PositionReviewer`: Audits open positions to ensure every margin position has an active exchange-side stop.
-- **FastAPI Live Dashboard (`tradingbot/server.py`, `tradingbot/dashboard_html.py`):**
-  - Real-time equity, PnL vs baseline, open positions, active exchange stops, and 10-pair radar signals.
-  - Shows **Estimated Net Close PnL** (after 0.12% taker fee) and **If Stop Hits** loss estimates.
-  - Includes one-click **Close Position** buttons (`POST /api/close-position`) to cancel resting orders on a pair and market-close immediately.
-  - **Settings Modal:** Update **Baseline Capital (JPY)** (with a `+¥10,000` deposit button), **Custom Goal Target (JPY)** (or leave `0` to auto-adjust `2x / 5x / 10x`), and **Spot Long-Only** mode for accounts without margin/short access.
-  - Optional dashboard login gate via `DASHBOARD_USER` / `DASHBOARD_PASS`.
+A long-only trend-following bot for the **Bitbank** exchange (BTC, ETH, XRP, SOL and DOGE against JPY, on margin), with a web dashboard, exchange-side stops on every position, and a backtester that runs the same rule code the live bot runs.
 
 ---
 
-## Strategy and settings
+## The rule
 
-One position at a time. Runtime switches live in `bot_config.json` (not committed).
+Everything the bot decides is in [`tradingbot/strategy.py`](tradingbot/strategy.py), on 4-hour candles:
 
-- **Short entry rule:** 4h trend down, 1h EMA20 below 1h EMA50, 15m RSI >= 65. Never shorts a 4h uptrend.
-- **Gradual entry (`scale_in`):** 50% of the planned size at the entry price, then 20% and 30% resting at better prices, 35% and 65% of the way to the stop. Unfilled steps are cancelled when the position closes or reaches +1.5%.
-- **Stop:** exchange-side stop 1.2% from entry, resized as steps fill, never moved away.
-- **Exit (`run_winners`):** no fixed target. From +1.6% the trailing stop locks +1.0% and follows the price. With `run_winners` off, the position closes at +1.8%.
-- **Size:** `leverage_factor` (capped at 1.95x) and `max_risk_pct_per_trade` (share of equity lost at a stop-out; 1.0 disables the cap).
-- **Brakes:** `equity_floor_jpy`, a 3% daily loss limit, a pause after 2 consecutive losses, and a per-setup learner (`learner_state.json`) that halves or blocks setups that keep losing.
-- **News override:** `news_override.json` forces one trade in the direction of a confirmed market-wide shock, with a 2.0% stop.
+- **Buy** a coin when a 4h candle closes above the highest high of the previous 120 candles (20 days).
+- **Stop** 3 × ATR below the entry (never closer than 1.5% nor further than 15%). The stop is a real stop order on the exchange. It follows the best price at that same distance and never moves down.
+- **No profit target.** A trade ends only when the trailing stop is hit, so losers are cut at about the planned amount and winners run until the trend turns.
+- **Size** each trade so that hitting the initial stop costs 2% of equity, capped at 65% of equity per position. At most 3 positions at once.
+- **Entry order:** a maker (post-only) buy rests at the signal price for 10 minutes to earn the 0.02% rebate; whatever has not filled is then bought at market.
+
+It does not short. It does nothing in a falling market except wait.
+
+### What the bot does about manual trades
+
+- A position you open yourself is never managed or closed by the bot. If it has no stop, the bot gives it one 1.2% from its entry on the second check (about 20 seconds later). You can move or cancel that stop.
+- Orders you place yourself are never cancelled.
+- A pair with a manual position is not traded by the bot, and manual positions count toward the 3-position limit.
+- **Pause** and **Emergency Stop** switch off new entries and survive a restart. Open positions keep their stops in both states, and the bot's own positions keep trailing.
 
 ---
 
-## One-Command Install & Run
+## Evidence
 
-Clone the repository and run `install_and_run.sh`:
+`python3 -m tradingbot.backtest` replays the rule on Bitbank's own candles. Assumptions are on the cautious side: entries after the signal candle closes, the low of a candle taken before its high, gaps through the stop filled at the open, taker fee (0.12%) plus 0.05% slippage on market and stop fills, and margin interest (0.04% per day).
+
+Results at 2% risk per trade, up to 3 positions. `R` is the result of a trade divided by the amount it risked.
+
+| Period | Trades | Winners | Average | Growth per year | Worst drawdown |
+|---|---|---|---|---|---|
+| 2017-01 to 2026-11, 4h candles | 436 | 46% | +0.32R | +27.7% | 17.3% |
+| 2023-01 to 2026-11 only (not used to choose the settings) | 218 | 42% | +0.28R | +30.2% | 17.3% |
+| 2025-06 to 2026-11 on 5-minute candles | 72 | 42% | +0.38R | +37.8% | 15.5% |
+
+Every calendar year from 2017 to 2026 was positive (between +2R and +28R). The nearby settings (channels of 10 to 30 days, stops of 2 to 4.5 ATR) were all positive in both the first and the second half of the history, so the result does not hang on one lucky setting.
+
+What this means in practice:
+
+- Fewer than half the trades win. The profit comes from a few large winners; the typical trade is a small loss.
+- About 45 trades a year, usually held for 2 to 6 days. Whole weeks pass without a trade, and long flat stretches are normal.
+- Past results do not guarantee future ones. The edge was smaller in 2023 to 2026 than in 2017 to 2022.
+
+What was tested and rejected on the same data:
+
+- **Selling rallies in a downtrend** (the previous rule: 4h down, 1h down, 15m RSI ≥ 65, 1.2% stop). Over 18 months of 5-minute candles it was between −0.09% and 0% per trade in every variant; its good results came only from the months it had been tuned on.
+- **Shorting breakdowns** (the mirror image of the buy rule). About zero or negative from 2023 on.
+- **Short channels** (3 days). Positive until 2022, negative since.
+
+---
+
+## Layout
+
+| File | What it is |
+|---|---|
+| `tradingbot/strategy.py` | The rule: breakout level, stop distance, position size, trailing stop. Pure functions. |
+| `tradingbot/backtest.py` | Replay on 4h candles (all years) or 5-minute candles (recent), through `strategy.py`. |
+| `tradingbot/engine.py` | The live engine: account read, entries, stops, journal. |
+| `tradingbot/bitbank.py` | Minimal Bitbank REST client. |
+| `tradingbot/server.py`, `dashboard_html.py` | Control API and web dashboard. |
+| `tradingbot/tax_japan.py` | Japan tax report (雑所得) from the exchange's trade history. |
+| `tests/` | Unit tests, a simulated exchange, and a randomised stress run of the engine. |
+
+Runtime files (not committed): `bot_config.json` (settings), `bot_state.json` (the bot's open positions), `trade_journal.json` (closed trades), `equity_history.json`, `trading_server.log`.
+
+---
+
+## Settings (`bot_config.json`)
+
+```json
+{
+  "baseline_jpy": 20000.66,
+  "equity_floor_jpy": 15000.0,
+  "capital_limit_jpy": null,
+  "goal_target_jpy": null,
+  "risk_per_trade_pct": 2.0,
+  "max_positions": 3,
+  "trading_enabled": true,
+  "emergency_stopped": false
+}
+```
+
+- `risk_per_trade_pct`: share of equity lost when a trade hits its initial stop (0 to 5). In the 2017 to 2026 replay, 1% gave about +14% a year with a 9% worst drawdown, 2% gave +27% with 17%, 3% gave +35% with 24%, and 5% gave +43% with 32%.
+- `equity_floor_jpy`: at or below this equity the bot opens nothing new.
+- `capital_limit_jpy`: size positions as if equity were at most this.
+- `trading_enabled`, `emergency_stopped`: written by the dashboard's Pause, Resume and Emergency Stop buttons.
+
+---
+
+## Install and run
 
 ```bash
 git clone git@github.com:wangchukkarma504/bitbank-trading-bot.git
@@ -47,135 +100,42 @@ chmod +x install_and_run.sh start.sh stop.sh
 ./install_and_run.sh
 ```
 
-By default, `./install_and_run.sh`:
-1. Creates a `.venv` virtual environment (if missing)
-2. Installs dependencies from `requirements.txt`
-3. Creates `.env` from `.env.example` (if missing)
-4. Starts the FastAPI server in **paper mode** on `http://localhost:8000`
-
-To install and run in **live mode** (after adding your Bitbank credentials to `.env`):
-
-```bash
-./install_and_run.sh --mode live --baseline 98874.1 --port 8000
-```
-
----
-
-## Configuration (`.env`)
-
-Copy `.env.example` to `.env` and fill in your credentials:
+Credentials go in `.env` (gitignored; copy `.env.example`):
 
 ```ini
-# Bitbank API Credentials (required for --mode live)
 API_KEY=your_bitbank_api_key_here
 SECRET_KEY=your_bitbank_api_secret_here
 
-# Optional Web Dashboard Authentication (leave DASHBOARD_PASS blank to disable login gate)
+# Optional dashboard login (leave DASHBOARD_PASS blank to disable it)
 DASHBOARD_USER=admin
 DASHBOARD_PASS=
 ```
 
-> **Security Note:** `.env` is gitignored. Never commit API keys or secrets.
-
----
-
-## Starting & Stopping the Server
-
-### Linux / macOS / WSL (`.sh`)
-
-- **Start in background:**
-  ```bash
-  ./start.sh live 8000 98874.1
-  # Arguments: [mode: live|paper] [port: 8000] [optional baseline JPY]
-  ```
-  Logs are written to `trading_server.log` and the process ID is saved to `.server.pid`.
-
-- **Stop the server:**
-  ```bash
-  ./stop.sh
-  ```
-  *(Note: Stopping the local server does **not** cancel existing native exchange-side stop orders on Bitbank.)*
-
-- **Run in foreground (manual):**
-  ```bash
-  python3 -u -m tradingbot.server --mode live --baseline 98874.1 --port 8000
-  # Add --spot-only for accounts without margin/short access
-  ```
-
-### Windows + WSL (`.bat`)
-
-- **Start:** Double-click `start_trading_server.bat` (stops any previous WSL server instance, opens `http://localhost:8000`, and starts the live server in WSL `Ubuntu-26.04`).
-- **Stop:** Double-click `stop_trading_server.bat` (terminates `tradingbot.server` inside WSL).
-
----
-
-## Auto-Learn Engine (`LossLearningEngine`)
-
-The bot includes an automatic self-learning module in [`tradingbot/analysis/loss_learner.py`](tradingbot/analysis/loss_learner.py) that monitors every closed trade, diagnoses losing trades, persists lessons to `loss_lessons.json`, and applies **bounded, reversible** safety adjustments so the bot stops repeating the same mistake.
-
-### How It Works
-When an open position closes, `LossLearningEngine.record_trade_close()` checks whether `exit_equity_jpy < entry_equity_jpy * 0.9995`:
-
-1. **If the trade was a loss:**
-   - Diagnoses the most likely root cause using the trade's hold duration, macro bias, orderbook depth ratio, and entry conviction:
-     | Root Cause | Trigger Condition | Automatic Adaptation Applied |
-     |---|---|---|
-     | `FAST_WHIPSAW_STOP` | Closed in `< 180s` | Raises `pair` min conviction (`+0.08`) **and** widens `stop_width_mult` by `+0.10x` (up to `1.25x` max) |
-     | `COUNTER_MACRO_BIAS` | Shorted into `BULLISH` macro or longed into `BEARISH` macro | Raises `pair` min conviction (`+0.08`) |
-     | `ORDERBOOK_IMBALANCE_TRAP` | Shorted with bid-heavy book (`depth_ratio >= 1.8`) or longed with ask-heavy book (`depth_ratio <= 0.55`) | Raises `pair` min conviction (`+0.08`) **and** enables `orderbook_penalty_active` (`-0.10` conviction penalty when book opposes trade) |
-     | `WEAK_CONVICTION_ENTRY` | Entry conviction `< 0.70` | Raises `pair` min conviction (`+0.08`) |
-     | `TREND_REVERSAL_EXHAUSTION` | Default when none of the above triggered | Raises `pair` min conviction (`+0.08`) |
-   - **Consecutive Loss Cooldown Scaling:** If a pair loses `2` or more times in a row, its post-loss cooldown scales by `streak` (up to `3.0x` via `get_pair_cooldown_multiplier()`).
-   - **Hard Safety Bounds:**
-     - `MAX_CONVICTION_BOOST = 0.25` (effective minimum conviction is always capped at `0.92` so the bot never locks itself out permanently).
-     - `MAX_STOP_WIDTH_MULT = 1.25` (stops are never widened beyond `+25%` and hard exchange-side stops always remain mandatory).
-     - `MAX_COOLDOWN_MULT = 3.0`
-
-2. **If the trade was a win or breakeven:**
-   - Resets `pair_loss_streaks[pair] = 0`.
-   - Gradually relaxes `pair_conviction_boost[pair]` by `-0.05` and `stop_width_mult` by `-0.05` (back toward `1.0x`), so temporary caution fades as market conditions improve.
-
-### Concrete Examples
-
-- **Example 1 — Fast Whipsaw Stop on `btc_jpy`:**
-  1. Bot enters a `btc_jpy` short with base `MIN_CONVICTION = 0.70`, and gets stopped out in `65s` for `-1,200 JPY`.
-  2. `diagnose_loss()` classifies it as **`FAST_WHIPSAW_STOP`** (`hold_duration_sec < 180s`).
-  3. Auto-Learn logs: `[AUTO-LEARN] Loss detected on btc_jpy (-1,200.0 JPY / -1.20%, 65s) | Cause=FAST_WHIPSAW_STOP | Fix=btc_jpy min_conv+0.08, stop_width_mult=1.10x`.
-  4. On the next `btc_jpy` signal, `btc_jpy` now requires **`0.78`** conviction instead of `0.70`, and its stop distance is automatically given **`1.10x`** breathing room.
-
-- **Example 2 — Orderbook Imbalance Trap on `sol_jpy`:**
-  1. Bot shorts `sol_jpy` while bids outweigh asks (`depth_ratio = 2.1 >= 1.8`) and loses `-1,000 JPY` after `400s`.
-  2. `diagnose_loss()` classifies it as **`ORDERBOOK_IMBALANCE_TRAP`**.
-  3. Auto-Learn enables `orderbook_imbalance_filter=ON` and raises `sol_jpy` min conviction by `+0.08`. Future opposing-book signals receive a `-0.10` conviction penalty.
-
-- **Example 3 — Recovery After a Win:**
-  1. `btc_jpy` later closes a winning trade (`+2,400 JPY`).
-  2. Auto-Learn resets `btc_jpy` loss streak to `0`, lowers `pair_conviction_boost["btc_jpy"]` by `0.05`, and reduces `stop_width_mult` from `1.10x` back down to `1.05x`.
-
----
-
-## Anti-Churn & Capital Preservation Guardrails
-
-- **Exchange-Side Stops:** Every open margin position is audited on every tick by `PositionReviewer` and protected by a native Bitbank `stop` order (`StopSyncManager`). Duplicate/partial stops are automatically deduplicated so full-coverage stops are always retained.
-- **Circuit Breakers:** Pauses new entries for 30 minutes if **2 consecutive losses** occur, **5+ entries** happen within 1 hour, or equity experiences a rapid drawdown from peak.
-- **Stale Limit Cleanup:** Resting maker limit orders older than 10 minutes, whose signal flipped, or whose target price drifted `> 1.0%` are cancelled automatically.
-
----
-
-## Progressive Web App (PWA) & Mobile Support
-
-The dashboard is a full **Progressive Web App** served over HTTPS (e.g. `https://your-domain.example.com` via Cloudflare Tunnel) with custom app icons (`/static/icon-180.png`, `icon-192.png`, `icon-512.png`), `/manifest.webmanifest`, and `/sw.js`:
-
-- **iPhone / iPad (Safari):** Open the dashboard URL → tap **Share** → **Add to Home Screen**.
-- **Android / Desktop (Chrome / Edge):** Tap **Menu → Install App** inside the dashboard (or click the browser address bar's **Install** icon).
-- **Mobile-Responsive Candlestick Chart:** The top **Live Bitbank Price Chart** automatically scales to your phone width (`1:1` crisp rendering, 36-candle mobile window, touch crosshair for OHLC inspection, and **Entry / Stop Loss / TP / Last** price overlays).
-
----
-
-## Running Tests
-
-Run the unit and integration test suite (uses `MockBitbank` — no live API calls):
+Start, stop and run by hand:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+./start.sh live 8000 20000.66      # mode (live or dry-run), port, baseline JPY; logs to trading_server.log
+./stop.sh                          # stops the server; stop orders on the exchange stay in place
+python3 -u -m tradingbot.server --mode live --baseline 20000.66 --port 8000
+```
+
+In `dry-run` mode the bot reads the account and the candles and logs what it would buy, but places no orders.
+
+On Windows with WSL, `start_trading_server.bat` and `stop_trading_server.bat` do the same.
+
+---
+
+## Dashboard
+
+The dashboard (`http://localhost:8000`, or your own HTTPS address through a tunnel) shows equity, open positions with their stops, a price chart with entry and stop lines, the breakout watch (how far each coin is from its 20-day high), closed trades, and the Japan tax report. It can be installed as an app from the browser (iPhone: Share, then Add to Home Screen; Android and desktop Chrome: Install App).
+
+Buttons: **Pause / Resume**, **Close Position** for one pair, and **STOP ALL TRADES**, which cancels every order and closes every position at market.
+
+---
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests          # unit tests plus a short stress run (no live API calls)
+python3 -m tests.test_engine_stress 12 2000    # longer stress run: failures, restarts, partial fills, manual trades
 ```
