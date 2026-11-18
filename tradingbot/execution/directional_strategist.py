@@ -76,6 +76,7 @@ class DirectionalStrategist:
     SHORT_TP_PCT: float = 0.018      # short take-profit distance (1.5R)
     LONG_TP_PCT: float = 0.018       # margin-pair long take-profit distance (1.5R)
     SHORT_FADE_RSI_MIN: float = 65.0  # shorts only into an overbought 15m rally, never chasing a drop
+    # Shorts also need the 1h trend down (1h EMA20 < 1h EMA50); see the gate in evaluate_pair.
 
     def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = False):
         self.client = bitbank_client
@@ -320,6 +321,13 @@ class DirectionalStrategist:
             reasons.append(
                 f"Short gated: RSI {tech_result.rsi:.1f} < {self.SHORT_FADE_RSI_MIN:.0f}, waiting for an overbought rally to sell"
             )
+        elif trend_1h is not None and trend_1h.ema20 > 0 and trend_1h.ema50 > 0 and (
+            align_1h == TrendAlignment.BULLISH.value or trend_1h.ema20 >= trend_1h.ema50
+        ):
+            # 150-day replay: the same rally-fade made ~+0.23%/trade with the 1h EMA20 below the 1h EMA50
+            # and ~0% with it above, so a rally is only sold while the 1h trend is still down.
+            short_allowed = False
+            reasons.append("Short gated: 1h trend is up (1h EMA20 >= 1h EMA50), not selling this rally")
 
         # =====================================================================
         # Signal Action & Target Pricing

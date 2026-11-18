@@ -26,10 +26,13 @@ def _tech(rsi: float) -> TechnicalDepthResult:
     )
 
 
-def _evaluate(rsi: float, align_4h: str = TrendAlignment.BEARISH.value) -> DirectionalSignal:
+def _evaluate(rsi: float, align_4h: str = TrendAlignment.BEARISH.value, hourly_up: bool = False) -> DirectionalSignal:
+    hourly = _trend("1hour", TrendAlignment.NEUTRAL.value)  # helper default: 1h EMA20 below 1h EMA50
+    if hourly_up:
+        hourly.ema20 = hourly.ema50 * 1.003
     mtf = {
         "4hour": _trend("4hour", align_4h),
-        "1hour": _trend("1hour", TrendAlignment.BULLISH.value),
+        "1hour": hourly,
         "15min": _trend("15min", TrendAlignment.BULLISH.value),
     }
     return DirectionalStrategist().evaluate_pair(
@@ -59,13 +62,24 @@ class TestShortGate(unittest.TestCase):
         self.assertEqual(sig.action, "NEUTRAL")
         self.assertTrue(any("Short gated: RSI" in r for r in sig.reasons))
 
+    def test_no_short_when_1h_trend_is_up(self):
+        sig = _evaluate(rsi=70.0, hourly_up=True)
+        self.assertEqual(sig.action, "NEUTRAL")
+        self.assertTrue(any("1h trend is up" in r for r in sig.reasons))
+
     def test_no_short_when_4h_trend_is_bullish(self):
         sig = _evaluate(rsi=75.0, align_4h=TrendAlignment.BULLISH.value)
         self.assertNotEqual(sig.action, "SHORT")
 
     def test_counter_trend_bounce_long_is_off_by_default(self):
         # 15m + 1h bullish inside a BTC bear regime used to qualify as a bounce long; it lost in backtest
-        sig = _evaluate(rsi=50.0)
+        mtf = {tf: _trend(tf, a) for tf, a in (("4hour", TrendAlignment.BEARISH.value),
+                                               ("1hour", TrendAlignment.BULLISH.value),
+                                               ("15min", TrendAlignment.BULLISH.value))}
+        sig = DirectionalStrategist().evaluate_pair(
+            pair="eth_jpy", mtf_trend=mtf, tech_result=_tech(50.0), btc_regime_bullish=False,
+            ticker={"last": "290000", "buy": "289990", "sell": "290010"},
+        )
         self.assertNotEqual(sig.action, "LONG")
         self.assertFalse(DirectionalStrategist().allow_counter_trend_longs)
 
