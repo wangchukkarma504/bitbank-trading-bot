@@ -23,6 +23,9 @@ equity_history.json
 loss_lessons.json
 daily_risk_state.json
 news_override.json
+learner_state.json
+tuner_state.json
+candle_cache/
 bot_config.json
 tax_profile.json
 tax_cache_*.json

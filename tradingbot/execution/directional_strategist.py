@@ -105,6 +105,8 @@ class DirectionalStrategist:
         self.client = bitbank_client
         self.allow_counter_trend_longs = allow_counter_trend_longs
         self.frequent_mode = frequent_mode
+        # Tunable by the daily auto-tuner (values always come from its fixed grid)
+        self.freq_require_1h: bool = False
         self.trend_analyst = MarketTrendAnalyst(bitbank_client)
         self.wick_analyst = WickAnatomyAnalyst(bitbank_client)
         self.tech_analyst = TechnicalDepthAnalyst(bitbank_client)
@@ -344,10 +346,13 @@ class DirectionalStrategist:
 
         # Frequent mode defines its entries directly (the scoring above is tuned for the selective rule)
         if self.frequent_mode and news is None and tech_result is not None and pair in MARGIN_PAIRS:
-            if align_4h == TrendAlignment.BEARISH.value and tech_result.rsi >= self.FREQ_SHORT_RSI_MIN:
+            h1_known = trend_1h is not None and trend_1h.ema20 > 0 and trend_1h.ema50 > 0
+            h1_down = (not self.freq_require_1h) or (h1_known and trend_1h.ema20 < trend_1h.ema50)
+            h1_up = (not self.freq_require_1h) or (h1_known and trend_1h.ema20 > trend_1h.ema50)
+            if align_4h == TrendAlignment.BEARISH.value and tech_result.rsi >= self.FREQ_SHORT_RSI_MIN and h1_down:
                 short_score = max(short_score, self.FREQ_CONVICTION)
                 reasons.append(f"FREQUENT MODE: sell rally (RSI {tech_result.rsi:.1f}) in 4h downtrend")
-            elif align_4h == TrendAlignment.BULLISH.value and tech_result.rsi <= self.FREQ_LONG_RSI_MAX:
+            elif align_4h == TrendAlignment.BULLISH.value and tech_result.rsi <= self.FREQ_LONG_RSI_MAX and h1_up:
                 long_score = max(long_score, self.FREQ_CONVICTION)
                 long_eligible = True
                 reasons.append(f"FREQUENT MODE: buy dip (RSI {tech_result.rsi:.1f}) in 4h uptrend")
@@ -370,7 +375,7 @@ class DirectionalStrategist:
             reasons.append(
                 f"Short gated: RSI {tech_result.rsi:.1f} < {self._short_rsi_min():.0f}, waiting for an overbought rally to sell"
             )
-        elif not self.frequent_mode and trend_1h is not None and trend_1h.ema20 > 0 and trend_1h.ema50 > 0 and (
+        elif (not self.frequent_mode or self.freq_require_1h) and trend_1h is not None and trend_1h.ema20 > 0 and trend_1h.ema50 > 0 and (
             align_1h == TrendAlignment.BULLISH.value or trend_1h.ema20 >= trend_1h.ema50
         ):
             # 150-day replay: the same rally-fade made ~+0.23%/trade with the 1h EMA20 below the 1h EMA50

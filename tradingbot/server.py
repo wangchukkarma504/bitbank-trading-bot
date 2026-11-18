@@ -193,10 +193,39 @@ class BotController:
             self.orchestrator.set_sizing_overrides(
                 leverage=cfg.get("leverage_factor"), max_risk_pct=cfg.get("max_risk_pct_per_trade")
             )
+            if cfg.get("target_trades_per_day") is not None:
+                self.target_trades_per_day = float(cfg["target_trades_per_day"])
             floor = cfg.get("equity_floor_jpy")
             self.orchestrator.equity_floor_jpy = float(floor) if floor is not None and float(floor) > 0 else None
         except Exception as e:
             logger.warning(f"Could not load bot config: {e}")
+
+    def start_auto_tuner(self, state_path: str = "tuner_state.json", cache_dir: str = "candle_cache") -> None:
+        """Load the last tuned settings and start the daily background tuning thread (frequent mode only)."""
+        from tradingbot.analysis.auto_tuner import AutoTuner
+
+        self.tuner = AutoTuner(state_path=state_path, cache_dir=cache_dir,
+                               min_trades_per_day=float(getattr(self, "target_trades_per_day", 3.0) or 3.0))
+        if self.tuner.last_run_ts > 0:
+            self.orchestrator.apply_tuned_params(self.tuner.params)
+
+        def loop() -> None:
+            time.sleep(90.0)  # let the trading loop settle first
+            while True:
+                try:
+                    if self.orchestrator.frequent_mode and self.tuner.due():
+                        report = self.tuner.tune()
+                        if report.get("status") == "ok":
+                            with self.lock:
+                                self.orchestrator.apply_tuned_params(self.tuner.params)
+                            logger.info(f"AUTO-TUNER: changed={report['changed']} | {report['reason']} | params={report['params']}")
+                        else:
+                            logger.warning(f"AUTO-TUNER: {report}")
+                except Exception as e:
+                    logger.warning(f"Auto-tuner pass failed: {e}")
+                time.sleep(900.0)
+
+        threading.Thread(target=loop, name="auto-tuner", daemon=True).start()
 
     def _save_config(self) -> None:
         if not self.config_path:
@@ -214,6 +243,7 @@ class BotController:
                         "frequent_mode": self.orchestrator.frequent_mode,
                         "equity_floor_jpy": self.orchestrator.equity_floor_jpy,
                         "leverage_factor": self.orchestrator._leverage_override,
+                        "target_trades_per_day": getattr(self, "target_trades_per_day", 3.0),
                         "max_risk_pct_per_trade": self.orchestrator._max_risk_override,
                     },
                     f,
@@ -929,6 +959,9 @@ class BotController:
             "equity_floor_jpy": getattr(orch, "equity_floor_jpy", None),
             "equity_floor_hit": bool(getattr(orch, "equity_floor_hit", False)),
             "leverage_factor": orch.risk_manager.SHORT_LEVERAGE_FACTOR,
+            "learner": orch.learner.summary()[:12],
+            "tuned_params": getattr(orch, "tuned_params", {}),
+            "tuner_report": getattr(getattr(self, "tuner", None), "last_report", {}),
             "max_risk_pct_per_trade": orch.risk_manager.MAX_RISK_PCT_PER_TRADE,
             "day_start_equity_jpy": round(float(getattr(orch, "_day_start_equity_jpy", 0.0) or 0.0), 2),
             "cooldown_sec": cd_rem,
@@ -1303,8 +1336,10 @@ def main() -> None:
         allow_shorts=not args.spot_only,
         daily_state_path="daily_risk_state.json",
         news_override_path="news_override.json",
+        learner_state_path="learner_state.json",
     )
     controller = BotController(orch, auto_start=True)
+    controller.start_auto_tuner()
     app = create_app(controller)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

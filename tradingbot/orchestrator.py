@@ -46,6 +46,7 @@ from tradingbot.analysis.technical_depth import TechnicalDepthAnalyst
 from tradingbot.analysis.macro_catalyst import MacroCatalystAnalyst, MacroCatalystReport
 from tradingbot.analysis.alt_momentum_scanner import AltcoinMomentumScanner, AltcoinBreakoutCandidate
 from tradingbot.analysis.loss_learner import LossLearningEngine
+from tradingbot.analysis.adaptive_learner import AdaptiveLearner
 from tradingbot.execution.position_reviewer import (
     PositionReviewer,
     PositionReviewResult,
@@ -114,6 +115,7 @@ class TradingOrchestrator:
         news_override_path: Optional[str] = None,
         frequent_mode: bool = False,
         equity_floor_jpy: Optional[float] = None,
+        learner_state_path: Optional[str] = None,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
@@ -172,6 +174,9 @@ class TradingOrchestrator:
         # Hard floor: at or below this equity the bot stops opening positions until the operator raises it
         self.equity_floor_jpy: Optional[float] = equity_floor_jpy
         self.equity_floor_hit: bool = False
+        # Learns from each closed trade which setups to keep taking (None path = in memory only)
+        self.learner = AdaptiveLearner(state_path=learner_state_path)
+        self.tuned_params: Dict[str, Any] = {}
         self.frequent_mode: bool = False
         self._leverage_override: Optional[float] = None
         self._max_risk_override: Optional[float] = None
@@ -264,6 +269,27 @@ class TradingOrchestrator:
         self.CONSECUTIVE_LOSS_PAUSE_SEC = pause
         self._apply_sizing_overrides()
 
+    def apply_tuned_params(self, params: Dict[str, Any]) -> None:
+        """Apply settings chosen by the daily auto-tuner (frequent mode's entry thresholds and trailing stop)."""
+        strat = self.directional_strategist
+        if "short_rsi_min" in params:
+            strat.FREQ_SHORT_RSI_MIN = float(params["short_rsi_min"])
+        if "long_rsi_max" in params:
+            strat.FREQ_LONG_RSI_MAX = float(params["long_rsi_max"])
+        if "require_1h" in params:
+            strat.freq_require_1h = bool(params["require_1h"])
+        if "trail_arm_pct" in params:
+            self.FREQ_TRAIL_ARM_PCT = float(params["trail_arm_pct"])
+        if "trail_dist_pct" in params:
+            self.FREQ_TRAIL_DIST_PCT = float(params["trail_dist_pct"])
+        self.tuned_params = dict(params)
+
+    def _signal_bucket(self, sig: Optional[DirectionalSignal], pair: str, side: str) -> str:
+        return AdaptiveLearner.bucket_key(
+            pair, side, float(getattr(sig, "rsi", 0.0) or 0.0) if sig else 0.0,
+            str(getattr(sig, "trend_1h", "")) if sig else "",
+        )
+
     def set_sizing_overrides(self, leverage: Optional[float] = None, max_risk_pct: Optional[float] = None) -> None:
         """Operator overrides for position size: leverage (capped at the exchange maximum) and the per-trade
         risk cap. None keeps the mode's default. A risk cap of 1.0 or more disables the cap (full leverage)."""
@@ -340,6 +366,8 @@ class TradingOrchestrator:
                     "wick_classification": str(getattr(sig, "wick_classification", "NONE")) if sig else "NONE",
                     "macro_bias": macro_bias,
                     # Exit plan the position was sized for (news trades use a wider stop and target)
+                    "bucket": None if (sig is not None and getattr(sig, "news_driven", False))
+                    else self._signal_bucket(sig, pair, str(pos.get("position_side", "short"))),
                     "stop_pct": self._plan_pct(sig, "stop_loss_price"),
                     "tp_pct": self._plan_pct(sig, "take_profit_price"),
                     "context": {
@@ -375,6 +403,9 @@ class TradingOrchestrator:
                     "exit_reason": self._last_exit_reason.pop(pair, "EXCHANGE_STOP_OR_MANUAL"),
                 },
             )
+            # Feed the result to the adaptive learner (news trades are one-offs and are not learned from)
+            if meta.get("bucket") and entry_eq > 0:
+                self.learner.record(str(meta["bucket"]), (equity - entry_eq) / entry_eq * 100.0, now_ts)
             self._global_cooldown_until = max(
                 self._global_cooldown_until, now_ts + self.POST_CLOSE_COOLDOWN_SEC
             )
@@ -916,6 +947,7 @@ class TradingOrchestrator:
             # Rank signals by learned-adjusted conviction (skipping pairs in loss cooldown)
             best_candidate: Optional[DirectionalSignal] = None
             best_eff_conv: float = 0.0
+            best_size_mult: float = 1.0
             for pair, sig in signals.items():
                 if now_ts < self._pair_cooldown_until.get(pair, 0.0):
                     continue
@@ -931,9 +963,17 @@ class TradingOrchestrator:
                     pair, self.directional_strategist.MIN_CONVICTION
                 )
                 if eff_conv >= req_conv:
+                    size_mult = 1.0
+                    if not getattr(sig, "news_driven", False):
+                        allowed, size_mult, why = self.learner.decision(self._signal_bucket(sig, pair, sig_side), now_ts)
+                        if not allowed:
+                            if self.tick_count % 30 == 0:
+                                self.logger.info(f"Learner skips {pair} {sig.action}: {why}")
+                            continue
                     if best_candidate is None or eff_conv > best_eff_conv:
                         best_candidate = sig
                         best_eff_conv = eff_conv
+                        best_size_mult = size_mult
 
             if best_candidate is not None and review_res.total_equity_jpy <= 0:
                 self.logger.error("Equity is not positive; skipping new entries.")
@@ -943,6 +983,7 @@ class TradingOrchestrator:
                 equity = review_res.total_equity_jpy
                 if self.capital_limit_jpy is not None and self.capital_limit_jpy > 0:
                     equity = min(equity, float(self.capital_limit_jpy))
+                equity *= best_size_mult  # the learner may halve the size of a setup that has been losing
                 order_side = "sell" if best_candidate.action == "SHORT" else "buy"
                 pos_side = "short" if best_candidate.action == "SHORT" else "long"
                 pos_type = "margin" if best_candidate.action == "SHORT" else "spot"
