@@ -134,6 +134,20 @@ class TestGradualEntry(unittest.TestCase):
         self.assertEqual(stops[0]["amount"], bigger)                    # covers the whole position
         self.assertAlmostEqual(float(stops[0]["trigger_price"]), STOP)  # not 1.2% above the new average
 
+    def test_run_winners_holds_past_the_target_and_lets_the_trailing_stop_follow(self):
+        at_target = ENTRY * (1 - 0.020)  # beyond the 1.8% target
+        for run, expect_close in ((False, True), (True, False)):
+            orch = self._orch(scale_in=False)
+            orch.run_winners = run
+            orch.position_reviewer.review = MagicMock(return_value=_review([_pos("0.1000", last=at_target)], [_stop(7, "0.1000")]))
+            orch.tick()
+            closes = [c.kwargs for c in orch.client.order.call_args_list if c.kwargs.get("side") == "buy" and c.kwargs.get("type_") in ("limit", "market")]
+            stops = [c.kwargs for c in orch.client.order.call_args_list if c.kwargs.get("type_") == "stop"]
+            self.assertEqual(bool(closes), expect_close)
+            if run:  # instead of closing, the stop is moved into profit below the entry
+                self.assertEqual(len(stops), 1)
+                self.assertLess(float(stops[0]["trigger_price"]), ENTRY * (1 - 0.009))
+
     def test_news_trades_and_disabled_flag_enter_in_one_step(self):
         orch = self._orch(scale_in=False)
         orch.position_reviewer.review = MagicMock(return_value=_review())

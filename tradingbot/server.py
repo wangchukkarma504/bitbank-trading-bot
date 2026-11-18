@@ -191,6 +191,7 @@ class BotController:
             if cfg.get("frequent_mode") is not None:
                 self.orchestrator.set_frequent_mode(bool(cfg["frequent_mode"]))
             self.orchestrator.scale_in = bool(cfg.get("scale_in", False))
+            self.orchestrator.run_winners = bool(cfg.get("run_winners", False))
             self.orchestrator.set_sizing_overrides(
                 leverage=cfg.get("leverage_factor"), max_risk_pct=cfg.get("max_risk_pct_per_trade")
             )
@@ -243,6 +244,7 @@ class BotController:
                         "allow_counter_trend_longs": self.orchestrator.allow_counter_trend_longs,
                         "frequent_mode": self.orchestrator.frequent_mode,
                         "scale_in": self.orchestrator.scale_in,
+                        "run_winners": self.orchestrator.run_winners,
                         "equity_floor_jpy": self.orchestrator.equity_floor_jpy,
                         "leverage_factor": self.orchestrator._leverage_override,
                         "target_trades_per_day": getattr(self, "target_trades_per_day", 3.0),
@@ -959,6 +961,7 @@ class BotController:
             "news_override": getattr(orch, "news_override", None),
             "frequent_mode": bool(getattr(orch, "frequent_mode", False)),
             "scale_in": bool(getattr(orch, "scale_in", False)),
+            "run_winners": bool(getattr(orch, "run_winners", False)),
             "equity_floor_jpy": getattr(orch, "equity_floor_jpy", None),
             "equity_floor_hit": bool(getattr(orch, "equity_floor_hit", False)),
             "leverage_factor": orch.risk_manager.SHORT_LEVERAGE_FACTOR,

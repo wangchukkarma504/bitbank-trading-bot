@@ -100,6 +100,7 @@ class TradingOrchestrator:
     FREQ_MAX_CONSECUTIVE_LOSSES: int = 3
     FREQ_CONSECUTIVE_LOSS_PAUSE_SEC: float = 3600.0
     TP_MAKER_WAIT_SEC: float = 60.0             # How long a resting maker take-profit may wait before a market close
+    RUN_WINNERS_BACKSTOP_PCT: float = 0.08      # Far target used when run_winners replaces the fixed take-profit
     SCALE_IN_TRANCHES: Tuple[float, ...] = (0.50, 0.20, 0.30)  # Share of the planned size per entry step
     SCALE_IN_LEVELS: Tuple[float, ...] = (0.35, 0.65)          # Where the adds rest, as a share of the entry-to-stop distance
 
@@ -183,6 +184,8 @@ class TradingOrchestrator:
         # Gradual entry for margin shorts: open SCALE_IN_TRANCHES[0] of the planned size, rest the remainder
         # at better prices between the entry and the stop. The stop price never moves away when adds fill.
         self.scale_in: bool = False
+        # Selective mode: hold a winning short past the 1.8% target and let the trailing stop end the trade
+        self.run_winners: bool = False
         self._scale_plans: Dict[str, Dict[str, Any]] = {}
         self.frequent_mode: bool = False
         self._leverage_override: Optional[float] = None
@@ -784,6 +787,10 @@ class TradingOrchestrator:
             if not tp_hit and side == "short" and avg_px > 0:
                 plan_tp = (self._active_position_meta.get(pair) or {}).get("tp_pct")
                 target_px = avg_px * (1.0 - (plan_tp or self.directional_strategist.SHORT_TP_PCT))
+                if self.run_winners and not self.frequent_mode and pair in MARGIN_PAIRS:
+                    # No fixed target: from +1.6% the trailing stop locks profit and follows the price down,
+                    # so a strong move is held until it turns. Only a far backstop target remains.
+                    target_px = avg_px * (1.0 - self.RUN_WINNERS_BACKSTOP_PCT)
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
             elif not tp_hit and side == "long" and avg_px > 0:
