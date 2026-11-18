@@ -32,6 +32,8 @@ SCENARIOS = [
     ("partial fills + failures + restarts", {"fault": 0.08, "restart": 0.01, "partial": 0.5}),
     ("manual trading alongside", {"manual": 0.02}),
     ("everything at once", {"fault": 0.10, "restart": 0.01, "partial": 0.5, "manual": 0.02}),
+    ("exchange refuses a second closing stop", {"one_stop": 1, "fault": 0.05}),
+    ("trading halts", {"halt": 0.01, "fault": 0.05, "restart": 0.005}),
 ]
 
 
@@ -66,6 +68,7 @@ def run(seed: int, ticks: int, cfg: dict):
     rng = random.Random(seed)
     fault, restart, partial, manual = (cfg.get(k, 0.0) for k in ("fault", "restart", "partial", "manual"))
     mock = MockBitbankClient(starting_cash_jpy=20000.0, baseline_budget_jpy=20000.0)
+    lag.clear()
     client = Faulty(mock, rng, fault)
     clock = {"t": 1_800_000_000.0}
     px = dict(START)
@@ -77,6 +80,7 @@ def run(seed: int, ticks: int, cfg: dict):
     violations = collections.Counter()
     examples = {}
     manual_orders, manual_positions = set(), set()
+    halt_until = {"t": 0.0}
 
     full_fill = mock._execute_limit_fill
 
@@ -101,6 +105,12 @@ def run(seed: int, ticks: int, cfg: dict):
     real_order = mock.order
 
     def watched_order(pair, side, **kw):
+        if clock["t"] < halt_until["t"]:                       # orders restricted; cancels still work
+            raise BitbankError("order: {'success': 0, 'data': {'code': 70009}} (halt)")
+        if (cfg.get("one_stop") and kw.get("type_") == "stop"
+                and any(o["status"] == "UNFILLED" and o["type"] == "stop" and o["pair"] == pair
+                        and o.get("position_side") == kw.get("position_side") for o in mock.orders.values())):
+            raise BitbankError("order: {'success': 0, 'data': {'code': 60001}} (second closing order)")
         if kw.get("type_") == "market" and (pair, kw.get("position_side")) in manual_positions:
             violations["bot_closed_manual_position"] += 1
         if kw.get("position_side") == "short" and side == "sell":
@@ -162,6 +172,9 @@ def run(seed: int, ticks: int, cfg: dict):
                     o = real_order(pair, "sell" if side == "short" else "buy", amount="0.0010",
                                    price=engine_mod.fmt_price(pair, far), type_="limit", position_side=side)
                     manual_orders.add(o["order_id"])
+            if rng.random() < cfg.get("halt", 0.0):
+                halt_until["t"] = clock["t"] + 20.0 * rng.randint(3, 15)
+                stats["halts"] += 1
             if rng.random() < restart:
                 eng = build()
                 stats["restarts"] += 1
@@ -174,7 +187,7 @@ def run(seed: int, ticks: int, cfg: dict):
             except Exception as e:  # noqa: BLE001
                 note("crash", f"{type(e).__name__}: {e}", i)
             client.armed = False
-            clean = clean + 1 if client.faults == before else 0
+            clean = clean + 1 if (client.faults == before and clock["t"] >= halt_until["t"]) else 0
             # a manual position that the price has stopped out is no longer a manual position
             held = {(p["pair"], p["position_side"]): p for p in mock.margin_positions_list if float(p["open_amount"]) > 0}
             manual_positions &= set(held)
@@ -190,6 +203,9 @@ def run(seed: int, ticks: int, cfg: dict):
     finally:
         engine_mod.BAR_MS = old_bar
     return violations, examples, stats
+
+
+lag = {}
 
 
 def audit(mock, eng, held, first_seen, manual_positions, manual_orders, orphan_streak, note, i):
@@ -221,6 +237,12 @@ def audit(mock, eng, held, first_seen, manual_positions, manual_orders, orphan_s
             continue                                           # adopted after a lost state file: protected only
         if cover > amt * 1.001:
             note("stop_larger_than_position", f"{pair} {amt} covered {cover} in {len(stops)} stops", i)
+        if stops:
+            level = max(float(o["trigger_price"]) for o in stops)
+            last = float(mock.tickers[pair]["last"])
+            lag[pair] = lag.get(pair, 0) + 1 if (meta["best"] - meta["dist"] * meta["entry"]) - level > 0.02 * last else 0
+            if lag[pair] == 6:
+                note("stop_not_following", f"{pair} stop {level} is far below its trailing level for 6 clean ticks", i)
         if stops and max(float(o["trigger_price"]) for o in stops) < meta["plan_stop"] * 0.9995:
             note("stop_below_plan", f"{pair} stop {max(float(o['trigger_price']) for o in stops)} plan {meta['plan_stop']}", i)
         if amt * float(p["average_price"]) > eng.params.max_notional * meta["equity_at_entry"] * 1.10:
@@ -252,7 +274,7 @@ def campaign(seeds: int, ticks: int, verbose: bool = False):
         if verbose:
             print(f"== {name}: {seeds} runs x {ticks} ticks | fills {s_all['fill_limit']} limit / {s_all['partial_fills']} partial / "
                   f"{s_all['fill_stop']} stop | closed trades {s_all['closed_trades']} | manual positions {s_all['manual_positions']} | "
-                  f"faults {s_all['faults']} | restarts {s_all['restarts']} | avg end equity {s_all['final_equity'] // seeds:,}")
+                  f"faults {s_all['faults']} | restarts {s_all['restarts']} | halts {s_all['halts']} | avg end equity {s_all['final_equity'] // seeds:,}")
             print("   violations:", dict(v_all) or "none")
     return total, first
 

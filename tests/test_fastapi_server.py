@@ -100,6 +100,11 @@ class TestFastAPIServer(unittest.TestCase):
         _, controller, _ = self._make_client(config_path=path)
         self.assertAlmostEqual(controller.engine.params.risk_per_trade, 0.015)
         self.assertEqual(controller.engine.params.max_positions, 2)
+        self.assertAlmostEqual(controller.engine.params.max_notional, 0.65)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"max_positions": 5}, f)
+        _, five, _ = self._make_client(config_path=path)
+        self.assertAlmostEqual(five.engine.params.max_notional * 5, 1.95)      # never more than the exchange lends
         self.assertEqual(controller.engine.settings.equity_floor_jpy, 15000.0)
         self.assertAlmostEqual(controller.engine.settings.baseline_jpy, 20000.66)
 

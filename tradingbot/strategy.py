@@ -16,7 +16,7 @@ up on years of Bitbank history (see README, "Evidence"); buying breakouts did, i
 
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 FEE_MAKER = -0.0002     # Bitbank pays makers 0.02%
 FEE_TAKER = 0.0012      # and charges takers 0.12% (market and stop orders)

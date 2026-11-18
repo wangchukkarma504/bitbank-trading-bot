@@ -185,7 +185,9 @@ class BotController:
             if risk and risk <= 5.0:
                 self.engine.params = replace(self.engine.params, risk_per_trade=risk / 100.0)
             if slots and slots <= 5:
-                self.engine.params = replace(self.engine.params, max_positions=int(slots))
+                # 1.95x is all the exchange lends: with more than three slots each position must be smaller
+                self.engine.params = replace(self.engine.params, max_positions=int(slots),
+                                             max_notional=min(self.engine.params.max_notional, round(1.95 / int(slots), 4)))
             # A pause or an emergency stop survives a restart: trading resumes only when the operator says so
             if cfg.get("emergency_stopped"):
                 self.emergency_stopped, self.running = True, False
@@ -409,7 +411,7 @@ class BotController:
                 now = time.time()
                 with self.lock:
                     self.last_tick_ts = now
-                    self.last_error = None
+                    self.last_error = self.engine.last_step_error
                     if now - self._last_history_ts >= self.HISTORY_EVERY_SEC:
                         self._last_history_ts = now
                         self.equity_history.append({"ts": int(now), "equity": round(float(res["equity_jpy"]), 2)})
@@ -564,6 +566,14 @@ class BotController:
         }
 
     def get_status(self) -> Dict[str, Any]:
+        for _ in range(3):
+            try:
+                return self._build_status()
+            except RuntimeError:      # the engine thread changed a dict while it was being read: read again
+                time.sleep(0.05)
+        return self._build_status()
+
+    def _build_status(self) -> Dict[str, Any]:
         eng = self.engine
         acct = eng.account
         s = eng.settings
