@@ -324,9 +324,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div id="marketChartLegend" style="display:flex;gap:10px;flex-wrap:wrap;font-size:12px;font-weight:700;color:var(--muted);"></div>
     </div>
-    <div id="marketChartWrap" style="width:100%;height:300px;position:relative;">
-      <div style="color:var(--muted);padding-top:120px;text-align:center;">Loading Bitbank candles...</div>
+    <div id="marketChartWrap" style="width:100%;height:430px;position:relative;background:#131722;border-radius:12px;overflow:hidden;">
+      <div style="color:#8b93a7;padding-top:150px;text-align:center;">Loading Bitbank candles...</div>
     </div>
+    <div id="marketChartInfo" style="display:none;gap:8px;flex-wrap:wrap;margin-top:10px;"></div>
   </div>
 
   <div class="grid-kpi">
@@ -927,8 +928,10 @@ async function refresh() {
 
     renderChart(d.trade_history, d.baseline_jpy, d.open_positions, d.in_trade_pnl_jpy);
     latestStatusData = d;
-    if (!chartPairManual && d.open_positions && d.open_positions.length > 0) {
-      const openPair = d.open_positions[0].pair;
+    const focusPair = (d.open_positions && d.open_positions.length > 0) ? d.open_positions[0].pair
+      : ((d.pending_orders && d.pending_orders.length > 0) ? d.pending_orders[0].pair : null);
+    if (!chartPairManual && focusPair) {
+      const openPair = focusPair;
       if (openPair && openPair !== chartPair) {
         chartPair = openPair;
         const sel = document.getElementById('chartPairSel');
@@ -1225,157 +1228,355 @@ function fmtPx(px) {
   return '¥' + n.toFixed(4);
 }
 
+function emaSeries(vals, period) {
+  const out = [];
+  const k = 2 / (period + 1);
+  let prev = null, sum = 0;
+  for (let i = 0; i < vals.length; i++) {
+    if (i < period) {
+      sum += vals[i];
+      prev = sum / (i + 1);
+      out.push(i === period - 1 ? prev : null);
+    } else {
+      prev = vals[i] * k + prev * (1 - k);
+      out.push(prev);
+    }
+  }
+  return out;
+}
+
+function bollinger(vals, period, mult) {
+  const mid = [], up = [], lo = [];
+  for (let i = 0; i < vals.length; i++) {
+    if (i < period - 1) { mid.push(null); up.push(null); lo.push(null); continue; }
+    let s = 0;
+    for (let j = i - period + 1; j <= i; j++) s += vals[j];
+    const m = s / period;
+    let v = 0;
+    for (let j = i - period + 1; j <= i; j++) v += (vals[j] - m) * (vals[j] - m);
+    const sd = Math.sqrt(v / period);
+    mid.push(m); up.push(m + mult * sd); lo.push(m - mult * sd);
+  }
+  return {mid, up, lo};
+}
+
+function rsiSeries(vals, period) {
+  const out = [null];
+  let ag = 0, al = 0;
+  for (let i = 1; i < vals.length; i++) {
+    const ch = vals[i] - vals[i - 1];
+    const g = Math.max(ch, 0), l = Math.max(-ch, 0);
+    if (i <= period) {
+      ag += g / period; al += l / period;
+      out.push(i === period ? (al === 0 ? 100 : 100 - 100 / (1 + ag / al)) : null);
+    } else {
+      ag = (ag * (period - 1) + g) / period;
+      al = (al * (period - 1) + l) / period;
+      out.push(al === 0 ? 100 : 100 - 100 / (1 + ag / al));
+    }
+  }
+  return out;
+}
+
+function yenSigned(v) {
+  const n = Number(v || 0);
+  return (n >= 0 ? '+' : '-') + '¥' + Math.abs(Math.round(n)).toLocaleString('en-US');
+}
+
 function renderMarketChart() {
   const wrap = document.getElementById('marketChartWrap');
   const legend = document.getElementById('marketChartLegend');
+  const info = document.getElementById('marketChartInfo');
   if (!wrap) return;
   if (!latestCandles || latestCandles.length === 0) {
-    wrap.innerHTML = '<div style="color:var(--muted);padding-top:120px;text-align:center;">Waiting for Bitbank candle data...</div>';
+    wrap.innerHTML = '<div style="color:#8b93a7;padding-top:150px;text-align:center;">Waiting for Bitbank candle data...</div>';
     return;
   }
 
+  const C = {
+    bg: '#131722', grid: 'rgba(255,255,255,0.06)', axis: '#8b93a7', text: '#d1d4dc',
+    up: '#26a69a', down: '#ef5350', bb: '#2f81f7', ema20: '#f59e0b', ema50: '#22c55e', rsi: '#c084fc',
+    entry: '#6366f1', stop: '#ef4444', tp: '#16a34a', orderShort: '#e5484d', orderLong: '#16a34a'
+  };
+
   const d = latestStatusData || {};
   const openPos = (d.open_positions || []).find(p => p.pair === chartPair) || null;
-  const sig = (d.signals || []).find(s => s.pair === chartPair) || null;
+  const pending = (d.pending_orders || []).find(o => o.pair === chartPair) || null;
 
-  const entryPx = openPos ? Number(openPos.avg_price || openPos.average_price || 0) : 0;
-  const stopPx = openPos ? Number(openPos.stop_trigger_price || 0) : 0;
-  const tpPx = (openPos && sig && Number(sig.take_profit_price || 0) > 0) ? Number(sig.take_profit_price) : 0;
-  const lastPx = openPos ? Number(openPos.last_price || 0) : Number(latestCandles[latestCandles.length - 1].c || 0);
-
-  let legHtml = `<span style="color:#0f172a;">Last: <b>${fmtPx(lastPx)}</b></span>`;
-  if (entryPx > 0) {
-    const sideLbl = (openPos.position_side || 'short').toUpperCase();
-    legHtml += `<span style="color:#4f46e5;">● Entry (${sideLbl}): <b>${fmtPx(entryPx)}</b></span>`;
-  }
-  if (stopPx > 0) {
-    const estStop = openPos.est_stop_pnl_jpy !== undefined ? ` (${openPos.est_stop_pnl_jpy >= 0 ? '+' : ''}${fmtJpy(openPos.est_stop_pnl_jpy)})` : '';
-    legHtml += `<span style="color:#dc2626;">▬ Stop Loss: <b>${fmtPx(stopPx)}${estStop}</b></span>`;
-  }
-  if (tpPx > 0) {
-    legHtml += `<span style="color:#16a34a;">┈ TP Target: <b>${fmtPx(tpPx)}</b></span>`;
-  }
-  if (legend) legend.innerHTML = legHtml;
+  const all = latestCandles;
+  const closesAll = all.map(c => c.c);
+  const ema20All = emaSeries(closesAll, 20);
+  const ema50All = emaSeries(closesAll, 50);
+  const bbAll = bollinger(closesAll, 20, 2);
+  const rsiAll = rsiSeries(closesAll, 14);
 
   const W = Math.max(300, Math.floor(wrap.clientWidth || 1040));
   const isMobile = W < 640;
-  const H = isMobile ? 250 : 300;
+  const H = isMobile ? 430 : 480;
   wrap.style.height = H + 'px';
-  const candles = isMobile ? latestCandles.slice(-36) : latestCandles;
-  const padL = isMobile ? 4 : 16;
-  const padR = isMobile ? 96 : 114;
-  const padT = 18, padB = 24;
+  const view = Math.min(all.length, isMobile ? 60 : 130);
+  const off = all.length - view;
+  const candles = all.slice(off);
+  const n = candles.length;
+  const sl = (arr) => arr.slice(off);
+  const ema20 = sl(ema20All), ema50 = sl(ema50All), rsi = sl(rsiAll);
+  const bbUp = sl(bbAll.up), bbLo = sl(bbAll.lo), bbMid = sl(bbAll.mid);
+
+  const lastPx = openPos && Number(openPos.last_price || 0) > 0 ? Number(openPos.last_price) : Number(candles[n - 1].c || 0);
+  const entryPx = openPos ? Number(openPos.avg_price || openPos.average_price || 0) : 0;
+  const stopPx = openPos ? Number(openPos.stop_trigger_price || 0) : 0;
+  const tpPx = openPos ? Number(openPos.take_profit_price || 0) : 0;
+  const side = openPos ? String(openPos.position_side || 'short') : (pending ? pending.side : '');
+
+  const padL = 6, padR = isMobile ? 74 : 86, padT = isMobile ? 52 : 30, padB = 22;  // padT leaves room for the OHLC readout
   const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const volH = plotH * 0.16;
-  const priceH = plotH - volH - 8;
+  const rsiH = isMobile ? 62 : 74;
+  const gap = 10;
+  const priceH = H - padT - padB - rsiH - gap;
+  const volH = priceH * 0.16;
+  const rsiTop = padT + priceH + gap;
 
-  const lows = candles.map(c => c.l);
-  const highs = candles.map(c => c.h);
-  if (entryPx > 0) { lows.push(entryPx); highs.push(entryPx); }
-  if (stopPx > 0) { lows.push(stopPx); highs.push(stopPx); }
-  if (tpPx > 0) { lows.push(tpPx); highs.push(tpPx); }
-  if (lastPx > 0) { lows.push(lastPx); highs.push(lastPx); }
-
+  const lows = candles.map(c => c.l), highs = candles.map(c => c.h);
+  bbUp.forEach(v => { if (v !== null) highs.push(v); });
+  bbLo.forEach(v => { if (v !== null) lows.push(v); });
+  const levels = [lastPx, entryPx, stopPx, tpPx];
+  if (pending) levels.push(pending.price, pending.planned_stop_price, pending.planned_take_profit_price);
+  levels.forEach(v => { if (v > 0) { lows.push(v); highs.push(v); } });
   let minP = Math.min(...lows), maxP = Math.max(...highs);
   const span = Math.max(1e-9, maxP - minP);
-  minP -= span * 0.07;
-  maxP += span * 0.07;
+  minP -= span * 0.05; maxP += span * 0.05;
   const pSpan = maxP - minP;
 
-  const maxVol = Math.max(1e-9, ...candles.map(c => c.v));
-  const yOf = (p) => padT + (1 - (p - minP) / pSpan) * priceH;
-  const n = candles.length;
   const step = plotW / n;
-  const cw = Math.max(3, Math.min(11, step * 0.68));
-  const axisFont = isMobile ? 9.5 : 10.5;
-  const tagFont = isMobile ? 9 : 10;
-  const tagW = padR - 4;
+  const cw = Math.max(2, Math.min(11, step * 0.7));
+  const xOf = (i) => padL + i * step + step / 2;
+  const yOf = (p) => padT + (1 - (p - minP) / pSpan) * priceH;
+  const yRsi = (v) => rsiTop + (1 - v / 100) * rsiH;
+  const fs = isMobile ? 9.5 : 10.5;
 
-  let gridHtml = '';
-  for (let i = 0; i <= 4; i++) {
-    const pv = minP + (pSpan * i / 4);
+  let grid = '';
+  for (let i = 0; i <= 5; i++) {
+    const pv = minP + pSpan * i / 5;
     const gy = yOf(pv);
-    gridHtml += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`;
-    gridHtml += `<text x="${W - padR + 5}" y="${(gy + 3.5).toFixed(1)}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtPx(pv)}</text>`;
+    grid += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="${C.grid}"/>`;
+    grid += `<text x="${W - padR + 6}" y="${(gy + 3.5).toFixed(1)}" fill="${C.axis}" font-size="${fs}">${fmtPx(pv).replace('¥', '')}</text>`;
   }
 
-  let candlesHtml = '';
-  candles.forEach((c, idx) => {
-    const cx = padL + idx * step + step / 2;
-    const isUp = c.c >= c.o;
-    const col = isUp ? '#16a34a' : '#dc2626';
-    const yH = yOf(c.h), yL = yOf(c.l), yO = yOf(c.o), yC = yOf(c.c);
-    const bodyTop = Math.min(yO, yC);
-    const bodyH = Math.max(1.5, Math.abs(yC - yO));
+  const linePath = (arr, yf) => {
+    let p = '', pen = false;
+    arr.forEach((v, i) => {
+      if (v === null || v === undefined) { pen = false; return; }
+      p += (pen ? 'L' : 'M') + xOf(i).toFixed(1) + ' ' + yf(v).toFixed(1) + ' ';
+      pen = true;
+    });
+    return p;
+  };
+
+  let bbFill = '';
+  const firstBb = bbUp.findIndex(v => v !== null);
+  if (firstBb >= 0) {
+    let top = '', bot = '';
+    for (let i = firstBb; i < n; i++) top += (i === firstBb ? 'M' : 'L') + xOf(i).toFixed(1) + ' ' + yOf(bbUp[i]).toFixed(1) + ' ';
+    for (let i = n - 1; i >= firstBb; i--) bot += 'L' + xOf(i).toFixed(1) + ' ' + yOf(bbLo[i]).toFixed(1) + ' ';
+    bbFill = `<path d="${top}${bot}Z" fill="rgba(47,129,247,0.07)"/>`;
+  }
+
+  const maxVol = Math.max(1e-9, ...candles.map(c => c.v));
+  let body = '';
+  candles.forEach((c, i) => {
+    const cx = xOf(i);
+    const col = c.c >= c.o ? C.up : C.down;
+    const yO = yOf(c.o), yC = yOf(c.c);
     const vh = (c.v / maxVol) * volH;
-    const vy = (padT + plotH) - vh;
-    candlesHtml += `<rect x="${(cx - cw / 2).toFixed(1)}" y="${vy.toFixed(1)}" width="${cw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${col}" opacity="0.22"/>`;
-    candlesHtml += `<line x1="${cx.toFixed(1)}" y1="${yH.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${col}" stroke-width="1.3"/>`;
-    candlesHtml += `<rect x="${(cx - cw / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${cw.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}" rx="1"/>`;
+    body += `<rect x="${(cx - cw / 2).toFixed(1)}" y="${(padT + priceH - vh).toFixed(1)}" width="${cw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${col}" opacity="0.28"/>`;
+    body += `<line x1="${cx.toFixed(1)}" y1="${yOf(c.h).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yOf(c.l).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
+    body += `<rect x="${(cx - cw / 2).toFixed(1)}" y="${Math.min(yO, yC).toFixed(1)}" width="${cw.toFixed(1)}" height="${Math.max(1, Math.abs(yC - yO)).toFixed(1)}" fill="${col}"/>`;
   });
 
-  function levelLine(px, color, label, dash) {
-    if (!px || px <= 0) return '';
+  const indicators = `
+    ${bbFill}
+    <path d="${linePath(bbUp, yOf)}" fill="none" stroke="${C.bb}" stroke-width="1.1"/>
+    <path d="${linePath(bbLo, yOf)}" fill="none" stroke="${C.bb}" stroke-width="1.1"/>
+    <path d="${linePath(bbMid, yOf)}" fill="none" stroke="${C.bb}" stroke-width="0.8" opacity="0.5"/>
+    <path d="${linePath(ema50, yOf)}" fill="none" stroke="${C.ema50}" stroke-width="1.3"/>
+    <path d="${linePath(ema20, yOf)}" fill="none" stroke="${C.ema20}" stroke-width="1.3"/>`;
+
+  // Horizontal trade levels: a line across the plot plus a price tag on the right axis
+  const tags = [];
+  let lines = '';
+  const addLevel = (px, color, dash, width) => {
+    if (!px || px <= 0) return;
     const y = yOf(px);
-    const da = dash ? `stroke-dasharray="${dash}"` : '';
-    return `
-      <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="${color}" stroke-width="1.6" ${da}/>
-      <rect x="${W - padR + 2}" y="${(y - 9).toFixed(1)}" width="${tagW}" height="18" rx="4" fill="${color}"/>
-      <text x="${W - padR + 6}" y="${(y + 3.5).toFixed(1)}" fill="#ffffff" font-size="${tagFont}" font-weight="800">${label} ${fmtPx(px)}</text>
-    `;
+    lines += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="${color}" stroke-width="${width || 1.2}" ${dash ? `stroke-dasharray="${dash}"` : ''}/>`;
+    tags.push({y, color, text: fmtPx(px).replace('¥', '')});
+  };
+  // A labelled box sitting on the line, like the exchange app's order marker
+  const boxes = [];
+  const addBox = (px, color, label, value) => {
+    if (!px || px <= 0) return;
+    boxes.push({y: yOf(px), color, label, value});
+  };
+
+  const lastCol = candles[n - 1].c >= candles[n - 1].o ? C.up : C.down;
+  addLevel(lastPx, lastCol, '2 3', 1);
+  if (openPos && entryPx > 0) {
+    addLevel(tpPx, C.tp, '5 4');
+    addLevel(stopPx, C.stop, '5 4');
+    addLevel(entryPx, C.entry, '', 1.5);
+    addBox(entryPx, C.entry, `${side.toUpperCase()} ${openPos.open_amount || openPos.amount || ''}`, yenSigned(openPos.unrealized_pnl_jpy));
+    if (tpPx > 0) addBox(tpPx, C.tp, 'TP', openPos.est_tp_pnl_jpy !== undefined ? yenSigned(openPos.est_tp_pnl_jpy) : '');
+    if (stopPx > 0) addBox(stopPx, C.stop, 'SL', openPos.est_stop_pnl_jpy !== undefined ? yenSigned(openPos.est_stop_pnl_jpy) : '');
+  } else if (pending) {
+    const oc = pending.side === 'short' ? C.orderShort : C.orderLong;
+    addLevel(pending.planned_take_profit_price, C.tp, '2 4', 1);
+    addLevel(pending.planned_stop_price, C.stop, '2 4', 1);
+    addLevel(pending.price, oc, '', 1.4);
+    addBox(pending.price, oc, `${pending.side === 'short' ? 'SELL' : 'BUY'} LIMIT`, String(pending.amount));
+    addBox(pending.planned_take_profit_price, C.tp, 'TP plan', yenSigned(pending.est_tp_pnl_jpy));
+    addBox(pending.planned_stop_price, C.stop, 'SL plan', yenSigned(pending.est_stop_pnl_jpy));
   }
 
-  let overlays = '';
-  overlays += levelLine(lastPx, '#334155', 'LAST', '2 3');
-  if (tpPx > 0) overlays += levelLine(tpPx, '#16a34a', 'TP', '4 3');
-  if (entryPx > 0) overlays += levelLine(entryPx, '#4f46e5', 'ENTRY', '');
-  if (stopPx > 0) overlays += levelLine(stopPx, '#dc2626', 'STOP', '6 3');
+  // Keep axis tags from overlapping
+  tags.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < tags.length; i++) if (tags[i].y - tags[i - 1].y < 17) tags[i].y = tags[i - 1].y + 17;
+  let tagHtml = '';
+  tags.forEach(t => {
+    tagHtml += `<rect x="${W - padR + 1}" y="${(t.y - 8.5).toFixed(1)}" width="${padR - 3}" height="17" rx="3" fill="${t.color}"/>`;
+    tagHtml += `<text x="${W - padR + 6}" y="${(t.y + 3.6).toFixed(1)}" fill="#ffffff" font-size="${fs}" font-weight="700">${t.text}</text>`;
+  });
 
-  const firstTs = new Date(candles[0].t);
-  const midTs = new Date(candles[Math.floor(n / 2)].t);
-  const lastTs = new Date(candles[n - 1].t);
-  const fmtT = (dt) => dt.toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit'});
+  boxes.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < boxes.length; i++) if (boxes[i].y - boxes[i - 1].y < 19) boxes[i].y = boxes[i - 1].y + 19;
+  let boxHtml = '';
+  const boxFs = isMobile ? 9.5 : 10.5;
+  boxes.forEach(b => {
+    const w1 = b.label.length * boxFs * 0.62 + 12;
+    const w2 = b.value ? b.value.length * boxFs * 0.62 + 12 : 0;
+    const x0 = Math.max(padL + 4, W - padR - w1 - w2 - (isMobile ? 8 : 60));
+    boxHtml += `<rect x="${x0.toFixed(1)}" y="${(b.y - 9).toFixed(1)}" width="${w1.toFixed(1)}" height="18" fill="#ffffff" stroke="${b.color}" stroke-width="1"/>`;
+    boxHtml += `<text x="${(x0 + 6).toFixed(1)}" y="${(b.y + 3.8).toFixed(1)}" fill="${b.color}" font-size="${boxFs}" font-weight="800">${b.label}</text>`;
+    if (b.value) {
+      boxHtml += `<rect x="${(x0 + w1).toFixed(1)}" y="${(b.y - 9).toFixed(1)}" width="${w2.toFixed(1)}" height="18" fill="${b.color}"/>`;
+      boxHtml += `<text x="${(x0 + w1 + 6).toFixed(1)}" y="${(b.y + 3.8).toFixed(1)}" fill="#ffffff" font-size="${boxFs}" font-weight="800">${b.value}</text>`;
+    }
+  });
 
+  // RSI pane
+  const lastRsi = [...rsi].reverse().find(v => v !== null && v !== undefined);
+  let rsiHtml = `<rect x="${padL}" y="${yRsi(70).toFixed(1)}" width="${plotW}" height="${(yRsi(30) - yRsi(70)).toFixed(1)}" fill="rgba(192,132,252,0.08)"/>`;
+  [70, 50, 30].forEach(v => {
+    rsiHtml += `<line x1="${padL}" y1="${yRsi(v).toFixed(1)}" x2="${W - padR}" y2="${yRsi(v).toFixed(1)}" stroke="rgba(255,255,255,0.18)" stroke-dasharray="4 4"/>`;
+    rsiHtml += `<text x="${W - padR + 6}" y="${(yRsi(v) + 3.5).toFixed(1)}" fill="${C.axis}" font-size="${fs}">${v}</text>`;
+  });
+  rsiHtml += `<path d="${linePath(rsi, yRsi)}" fill="none" stroke="${C.rsi}" stroke-width="1.3"/>`;
+  rsiHtml += `<text x="${padL + 4}" y="${rsiTop + 12}" fill="${C.axis}" font-size="${fs}" font-weight="700">RSI 14</text>`;
+  if (lastRsi !== undefined) {
+    const ry = yRsi(lastRsi);
+    rsiHtml += `<rect x="${W - padR + 1}" y="${(ry - 8.5).toFixed(1)}" width="${padR - 3}" height="17" rx="3" fill="${C.rsi}"/>`;
+    rsiHtml += `<text x="${W - padR + 6}" y="${(ry + 3.6).toFixed(1)}" fill="#1e1033" font-size="${fs}" font-weight="800">${lastRsi.toFixed(2)}</text>`;
+  }
+
+  // Time axis
+  const tfDaily = chartTf === '1hour' || chartTf === '4hour';
+  const fmtT = (ms) => {
+    const dt = new Date(ms);
+    return tfDaily ? `${dt.getMonth() + 1}/${dt.getDate()}` : dt.toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit'});
+  };
+  let timeHtml = '';
+  const ticks = isMobile ? 4 : 7;
+  for (let i = 0; i < ticks; i++) {
+    const idx = Math.min(n - 1, Math.round((n - 1) * i / (ticks - 1)));
+    const anchor = i === 0 ? 'start' : (i === ticks - 1 ? 'end' : 'middle');
+    timeHtml += `<text x="${xOf(idx).toFixed(1)}" y="${H - 6}" fill="${C.axis}" font-size="${fs}" text-anchor="${anchor}">${fmtT(candles[idx].t)}</text>`;
+  }
+
+  const ohlcText = (c, i) => {
+    const chg = c.o > 0 ? (c.c - c.o) / c.o * 100 : 0;
+    const col = c.c >= c.o ? C.up : C.down;
+    const r = rsi[i];
+    return `<span style="color:${C.text};">${new Date(c.t).toLocaleString('ja-JP', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})}</span>
+      <span style="color:${col};">O ${fmtPx(c.o).replace('¥', '')} H ${fmtPx(c.h).replace('¥', '')} L ${fmtPx(c.l).replace('¥', '')} C ${fmtPx(c.c).replace('¥', '')} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)</span>
+      <span style="color:${C.ema20};">EMA20 ${ema20[i] ? fmtPx(ema20[i]).replace('¥', '') : '--'}</span>
+      <span style="color:${C.ema50};">EMA50 ${ema50[i] ? fmtPx(ema50[i]).replace('¥', '') : '--'}</span>
+      <span style="color:${C.bb};">BB ${bbLo[i] ? fmtPx(bbLo[i]).replace('¥', '') : '--'} – ${bbUp[i] ? fmtPx(bbUp[i]).replace('¥', '') : '--'}</span>
+      <span style="color:${C.rsi};">RSI ${r !== null && r !== undefined ? r.toFixed(1) : '--'}</span>`;
+  };
+
+  wrap.style.background = C.bg;
+  wrap.style.borderRadius = '12px';
+  wrap.style.overflow = 'hidden';
   wrap.innerHTML = `
-    <div id="marketTooltip" style="display:none;position:absolute;top:6px;left:8px;right:${padR + 4}px;background:rgba(15,23,42,0.9);color:#fff;padding:5px 9px;border-radius:8px;font-size:11px;font-weight:600;pointer-events:none;z-index:5;"></div>
-    <svg id="marketSvg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" style="cursor:crosshair;">
-      ${gridHtml}
-      ${candlesHtml}
-      ${overlays}
-      <line id="crossV" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(15,23,42,0.35)" stroke-width="1" stroke-dasharray="3 3" style="display:none;"/>
-      <text x="${padL}" y="${H - 6}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtT(firstTs)}</text>
-      <text x="${(padL + plotW / 2 - 16).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtT(midTs)}</text>
-      <text x="${(W - padR - 34).toFixed(1)}" y="${H - 6}" fill="#64748b" font-size="${axisFont}" font-weight="600">${fmtT(lastTs)}</text>
+    <div id="marketTooltip" style="position:absolute;top:6px;left:10px;right:${padR + 6}px;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:${isMobile ? 10 : 11}px;font-weight:700;pointer-events:none;z-index:5;line-height:1.35;"></div>
+    <svg id="marketSvg" viewBox="0 0 ${W} ${H}" width="100%" height="100%" style="cursor:crosshair;display:block;">
+      <rect x="0" y="0" width="${W}" height="${H}" fill="${C.bg}"/>
+      ${grid}
+      ${indicators}
+      ${body}
+      ${lines}
+      ${rsiHtml}
+      <line x1="${padL}" y1="${(rsiTop - gap / 2).toFixed(1)}" x2="${W}" y2="${(rsiTop - gap / 2).toFixed(1)}" stroke="rgba(255,255,255,0.14)"/>
+      <line id="crossV" x1="0" y1="${padT}" x2="0" y2="${rsiTop + rsiH}" stroke="rgba(255,255,255,0.35)" stroke-dasharray="3 3" style="display:none;"/>
+      ${boxHtml}
+      ${tagHtml}
+      ${timeHtml}
     </svg>`;
 
   const svg = document.getElementById('marketSvg');
   const tip = document.getElementById('marketTooltip');
   const crossV = document.getElementById('crossV');
-  if (svg && tip && crossV) {
+  tip.innerHTML = ohlcText(candles[n - 1], n - 1);
+  if (svg && crossV) {
     const showAt = (clientX) => {
       const rect = svg.getBoundingClientRect();
       const relX = ((clientX - rect.left) / rect.width) * W;
       const idx = Math.max(0, Math.min(n - 1, Math.floor((relX - padL) / step)));
-      const c = candles[idx];
-      if (!c) return;
-      const cx = padL + idx * step + step / 2;
-      crossV.setAttribute('x1', cx.toFixed(1));
-      crossV.setAttribute('x2', cx.toFixed(1));
+      crossV.setAttribute('x1', xOf(idx).toFixed(1));
+      crossV.setAttribute('x2', xOf(idx).toFixed(1));
       crossV.style.display = 'block';
-      const dt = new Date(c.t).toLocaleString('ja-JP', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
-      tip.style.display = 'block';
-      tip.textContent = `${dt} | O:${fmtPx(c.o)} H:${fmtPx(c.h)} L:${fmtPx(c.l)} C:${fmtPx(c.c)}`;
+      tip.innerHTML = ohlcText(candles[idx], idx);
     };
-    const hideTip = () => {
-      crossV.style.display = 'none';
-      tip.style.display = 'none';
-    };
+    const hide = () => { crossV.style.display = 'none'; tip.innerHTML = ohlcText(candles[n - 1], n - 1); };
     svg.addEventListener('mousemove', (ev) => showAt(ev.clientX));
-    svg.addEventListener('mouseleave', hideTip);
+    svg.addEventListener('mouseleave', hide);
     svg.addEventListener('touchstart', (ev) => { if (ev.touches && ev.touches[0]) showAt(ev.touches[0].clientX); }, {passive: true});
     svg.addEventListener('touchmove', (ev) => { if (ev.touches && ev.touches[0]) showAt(ev.touches[0].clientX); }, {passive: true});
-    svg.addEventListener('touchend', hideTip);
+    svg.addEventListener('touchend', hide);
+  }
+
+  // Header legend and the trade summary strip under the chart
+  if (legend) {
+    const state = openPos ? `<span style="color:${C.entry};">● ${side.toUpperCase()} position open</span>`
+      : (pending ? `<span style="color:${pending.side === 'short' ? C.orderShort : C.orderLong};">● ${pending.side === 'short' ? 'Sell' : 'Buy'} limit waiting to fill</span>`
+        : '<span>No position or order on this pair</span>');
+    legend.innerHTML = `<span style="color:#0f172a;">Last: <b>${fmtPx(lastPx)}</b></span>${state}`;
+  }
+  if (info) {
+    const chip = (label, value, color) => `<div style="padding:6px 10px;border-radius:9px;background:rgba(15,23,42,0.05);min-width:92px;">
+      <div style="font-size:10.5px;font-weight:700;color:var(--muted);">${label}</div>
+      <div style="font-size:13px;font-weight:800;color:${color || '#0f172a'};">${value}</div></div>`;
+    let html = '';
+    if (openPos && entryPx > 0) {
+      const gainPct = side === 'short' ? (entryPx - lastPx) / entryPx * 100 : (lastPx - entryPx) / entryPx * 100;
+      const upnl = Number(openPos.unrealized_pnl_jpy || 0);
+      html += chip('Position', `${side.toUpperCase()} ${openPos.open_amount || openPos.amount || ''}`, C.entry);
+      html += chip('Entry', fmtPx(entryPx));
+      html += chip('Last', fmtPx(lastPx));
+      html += chip('Unrealized', `${yenSigned(upnl)} (${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(2)}%)`, upnl >= 0 ? C.tp : C.stop);
+      html += chip('Stop loss', stopPx > 0 ? `${fmtPx(stopPx)}${openPos.est_stop_pnl_jpy !== undefined ? ' · ' + yenSigned(openPos.est_stop_pnl_jpy) : ''}` : 'NOT SET', C.stop);
+      html += chip('Take profit', tpPx > 0 ? `${fmtPx(tpPx)}${openPos.est_tp_pnl_jpy !== undefined ? ' · ' + yenSigned(openPos.est_tp_pnl_jpy) : ''}` : '--', C.tp);
+      if (stopPx > 0 && tpPx > 0 && Math.abs(stopPx - entryPx) > 0) {
+        html += chip('Reward : risk', (Math.abs(entryPx - tpPx) / Math.abs(stopPx - entryPx)).toFixed(2) + ' : 1');
+      }
+    } else if (pending) {
+      const oc = pending.side === 'short' ? C.orderShort : C.orderLong;
+      const dist = lastPx > 0 ? (pending.price - lastPx) / lastPx * 100 : 0;
+      html += chip('Pending order', `${pending.side === 'short' ? 'SELL' : 'BUY'} LIMIT ${pending.amount}`, oc);
+      html += chip('Order price', `${fmtPx(pending.price)} (${dist >= 0 ? '+' : ''}${dist.toFixed(2)}% from last)`);
+      html += chip('Planned stop', `${fmtPx(pending.planned_stop_price)} · ${yenSigned(pending.est_stop_pnl_jpy)}`, C.stop);
+      html += chip('Planned target', `${fmtPx(pending.planned_take_profit_price)} · ${yenSigned(pending.est_tp_pnl_jpy)}`, C.tp);
+    }
+    info.innerHTML = html;
+    info.style.display = html ? 'flex' : 'none';
   }
 }
 

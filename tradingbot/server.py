@@ -714,10 +714,50 @@ class BotController:
                     p["stop_trigger_price"] = trig
                     p["est_stop_pnl_jpy"] = round(stop_gross - stop_fee, 2)
 
+            # Take-profit level the orchestrator will act on, so the chart can draw it
+            strat = orch.directional_strategist
+            if amt > 0 and avg_px > 0:
+                if p_side == "short":
+                    tp_px = avg_px * (1.0 - strat.SHORT_TP_PCT)
+                elif p.get("pair") in SPOT_ONLY_PAIRS and orch.allow_counter_trend_longs:
+                    tp_px = avg_px * 1.012
+                else:
+                    tp_px = avg_px * (1.0 + strat.LONG_TP_PCT)
+                p["take_profit_price"] = round(tp_px, 4)
+                p["est_tp_pnl_jpy"] = round(amt * abs(avg_px - tp_px) - amt * tp_px * 0.0012, 2)
+
             in_trade_pnl += upnl
             in_trade_notional += notional
             in_trade_est_net += est_net
         in_trade_pct = (in_trade_pnl / in_trade_notional * 100.0) if in_trade_notional > 0 else 0.0
+
+        # Resting entry orders with the stop / target they will get once filled
+        pending_orders = []
+        strat = orch.directional_strategist
+        for o in (getattr(rev, "active_orders", None) or []) if rev else []:
+            try:
+                if o.get("type") != "limit":
+                    continue
+                o_px = float(o.get("price") or 0.0)
+                o_amt = float(o.get("remaining_amount") or o.get("start_amount") or o.get("amount") or 0.0)
+                if o_px <= 0 or o_amt <= 0:
+                    continue
+                is_short = o.get("side") == "sell"
+                o_stop = o_px * (1.0 + strat.STOP_PCT) if is_short else o_px * (1.0 - strat.STOP_PCT)
+                o_tp = o_px * (1.0 - strat.SHORT_TP_PCT) if is_short else o_px * (1.0 + strat.LONG_TP_PCT)
+                pending_orders.append({
+                    "pair": o.get("pair"),
+                    "order_id": o.get("order_id"),
+                    "side": "short" if is_short else "long",
+                    "price": o_px,
+                    "amount": o_amt,
+                    "planned_stop_price": round(o_stop, 4),
+                    "planned_take_profit_price": round(o_tp, 4),
+                    "est_stop_pnl_jpy": round(-o_amt * abs(o_stop - o_px) - o_amt * o_stop * 0.0012, 2),
+                    "est_tp_pnl_jpy": round(o_amt * abs(o_px - o_tp) - o_amt * o_tp * 0.0012, 2),
+                })
+            except (TypeError, ValueError):
+                continue
 
         if 95000.0 <= baseline <= 105000.0:
             t2x, t5x, t10x = 200000.0, 500000.0, 1000000.0
@@ -868,6 +908,7 @@ class BotController:
             "milestones": {"x2": _ms(t2x), "x5": _ms(t5x), "x10": _ms(t10x)},
             "open_positions": open_positions,
             "active_stops": active_stops,
+            "pending_orders": pending_orders,
             "signals": signals_out,
             "macro": macro_out,
             "circuit_breaker_sec": cb_rem,
@@ -881,7 +922,7 @@ class BotController:
             "last_emergency_report": em_report,
         }
 
-    def get_candles(self, pair: str = "btc_jpy", tf: str = "15min", limit: int = 80) -> Dict[str, Any]:
+    def get_candles(self, pair: str = "btc_jpy", tf: str = "15min", limit: int = 200) -> Dict[str, Any]:
         """Fetch OHLCV candles from Bitbank public API for the live chart."""
         valid_tfs = {"5min", "15min", "1hour", "4hour"}
         tf_clean = tf if tf in valid_tfs else "15min"
@@ -892,11 +933,17 @@ class BotController:
             if tf_clean == "4hour":
                 raw_rows = self.orchestrator.client.candles(pair_clean, tf_clean, now_utc.strftime("%Y")) or []
             else:
-                yday = (now_utc - timedelta(days=1)).strftime("%Y%m%d")
-                today = now_utc.strftime("%Y%m%d")
-                for day_str in (yday, today):
+                # Enough history for EMA50 / Bollinger / RSI warm-up plus the visible window
+                days_back = {"5min": 1, "15min": 3, "1hour": 9}.get(tf_clean, 1)
+                day_strs = [(now_utc - timedelta(days=d)).strftime("%Y%m%d") for d in range(days_back, -1, -1)]
+                analyst = self.orchestrator.trend_analyst
+                for day_str in day_strs:
                     try:
-                        raw_rows.extend(self.orchestrator.client.candles(pair_clean, tf_clean, day_str) or [])
+                        # Past days never change: reuse the analyst's TTL cache instead of refetching them
+                        ttl = 10.0 if day_str == day_strs[-1] else 3600.0
+                        raw_rows.extend(
+                            analyst._get_cached_or_fetch_rows(self.orchestrator.client, pair_clean, tf_clean, day_str, ttl) or []
+                        )
                     except Exception:
                         pass
             candles = []
