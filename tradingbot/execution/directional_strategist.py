@@ -53,6 +53,10 @@ class DirectionalSignal:
     resistance_wall: Optional[float] = None
     support_wall: Optional[float] = None
     timestamp: int = 0
+    # Entry context kept for the per-trade journal
+    rsi: float = 50.0
+    trend_1h: str = TrendAlignment.NEUTRAL.value
+    trend_15m: str = TrendAlignment.NEUTRAL.value
 
 
 class DirectionalStrategist:
@@ -397,6 +401,9 @@ class DirectionalStrategist:
             resistance_wall=res_wall,
             support_wall=sup_wall,
             timestamp=now_ms,
+            rsi=float(tech_result.rsi) if tech_result else 50.0,
+            trend_1h=align_1h,
+            trend_15m=align_15m,
         )
 
     def scan_all_pairs(

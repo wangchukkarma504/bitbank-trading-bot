@@ -34,6 +34,13 @@ class TradeLesson:
     depth_ratio: float = 1.0
     wick_classification: str = "NONE"
     macro_bias: str = "NEUTRAL"
+    # Entry context and exit type, so each closed trade can be reviewed against the backtest
+    entry_rsi: float = 0.0
+    trend_4h: str = ""
+    trend_1h: str = ""
+    trend_15m: str = ""
+    entry_price: float = 0.0
+    exit_reason: str = ""
 
 
 class LossLearningEngine:
@@ -118,12 +125,14 @@ class LossLearningEngine:
         wick_classification: str = "NONE",
         macro_bias: str = "NEUTRAL",
         now_ts: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> TradeLesson:
         """Record a closed trade, diagnose any loss, and apply bounded self-fixes."""
         ts = now_ts if now_ts is not None else time.time()
         pnl_jpy = exit_equity_jpy - entry_equity_jpy
         pnl_pct = (pnl_jpy / entry_equity_jpy * 100.0) if entry_equity_jpy > 0 else 0.0
         is_loss = entry_equity_jpy > 0 and exit_equity_jpy < (entry_equity_jpy * 0.9995)
+        ctx = {k: v for k, v in (context or {}).items() if k in TradeLesson.__dataclass_fields__}
 
         if not is_loss:
             # Winning / break-even trade: gradually relax temporary penalties
@@ -148,6 +157,7 @@ class LossLearningEngine:
                 depth_ratio=depth_ratio,
                 wick_classification=wick_classification,
                 macro_bias=macro_bias,
+                **ctx,
             )
             self.lessons.append(lesson)
             self._save()
@@ -199,6 +209,7 @@ class LossLearningEngine:
             depth_ratio=depth_ratio,
             wick_classification=wick_classification,
             macro_bias=macro_bias,
+            **ctx,
         )
         self.lessons.append(lesson)
         self._save()

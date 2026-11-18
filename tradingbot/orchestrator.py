@@ -152,6 +152,9 @@ class TradingOrchestrator:
         self._load_daily_state()
         self.loss_learner = LossLearningEngine(state_path="loss_lessons.json")
         self._active_position_meta: Dict[str, Dict[str, Any]] = {}
+        # Signal that produced each resting entry order, so the journal records the real entry context
+        self._pending_entry_signals: Dict[str, DirectionalSignal] = {}
+        self._last_exit_reason: Dict[str, str] = {}
 
     def _load_daily_state(self) -> None:
         if not self.daily_state_path or not os.path.exists(self.daily_state_path):
@@ -221,7 +224,7 @@ class TradingOrchestrator:
                 upnl = float(pos.get("unrealized_pnl_jpy", 0.0) or 0.0)
                 self._active_tracked_positions[pair] = equity - upnl
                 self._recent_entry_timestamps.append(now_ts)
-                sig = self.last_signals.get(pair)
+                sig = self._pending_entry_signals.pop(pair, None) or self.last_signals.get(pair)
                 macro_bias = getattr(self.last_macro_report, "catalyst_bias", "NEUTRAL") if self.last_macro_report else "NEUTRAL"
                 self._active_position_meta[pair] = {
                     "entry_time": now_ts,
@@ -230,6 +233,13 @@ class TradingOrchestrator:
                     "depth_ratio": getattr(sig, "depth_ratio", 1.0) if sig else 1.0,
                     "wick_classification": str(getattr(sig, "wick_classification", "NONE")) if sig else "NONE",
                     "macro_bias": macro_bias,
+                    "context": {
+                        "entry_rsi": float(getattr(sig, "rsi", 0.0) or 0.0) if sig else 0.0,
+                        "trend_4h": str(getattr(sig, "trend_alignment", "")) if sig else "",
+                        "trend_1h": str(getattr(sig, "trend_1h", "")) if sig else "",
+                        "trend_15m": str(getattr(sig, "trend_15m", "")) if sig else "",
+                        "entry_price": float(pos.get("avg_price", pos.get("average_price", 0.0)) or 0.0),
+                    },
                 }
 
         # Detect closed positions (transitioned from open -> flat)
@@ -251,6 +261,10 @@ class TradingOrchestrator:
                 wick_classification=str(meta.get("wick_classification", "NONE")),
                 macro_bias=str(meta.get("macro_bias", "NEUTRAL")),
                 now_ts=now_ts,
+                context={
+                    **(meta.get("context") or {}),
+                    "exit_reason": self._last_exit_reason.pop(pair, "EXCHANGE_STOP_OR_MANUAL"),
+                },
             )
             self._global_cooldown_until = max(
                 self._global_cooldown_until, now_ts + self.POST_CLOSE_COOLDOWN_SEC
@@ -511,6 +525,9 @@ class TradingOrchestrator:
                     is_emergency_close = True
 
             if tp_hit:
+                self._last_exit_reason[pair] = (
+                    "FORCE_PROFIT_CLOSE" if force_tp_hit else ("EARLY_CUT_OR_SPOT_STOP" if is_emergency_close else "TAKE_PROFIT")
+                )
                 if force_tp_hit:
                     self.logger.info(
                         f"[FORCE PROFIT CLOSE] Target ¥{self.force_profit_close_jpy:,.0f} reached "
@@ -712,6 +729,7 @@ class TradingOrchestrator:
                     try:
                         if pos_type == "spot":
                             self.position_reviewer.spot_entry_prices[best_candidate.pair] = best_candidate.entry_price
+                        self._pending_entry_signals[best_candidate.pair] = best_candidate
                         order_res = self.risk_manager.place_maker_limit_order(
                             pair=best_candidate.pair,
                             side=order_side,

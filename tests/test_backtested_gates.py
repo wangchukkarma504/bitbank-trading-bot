@@ -149,5 +149,28 @@ class TestDailyLossLimit(unittest.TestCase):
         self.assertFalse(orch._daily_loss_halted)
 
 
+class TestTradeJournal(unittest.TestCase):
+    def test_closed_trade_records_entry_context_and_exit_reason(self):
+        orch = TradingOrchestrator(client=MagicMock(), baseline_budget_jpy=20000.0, mode="live", pairs=["eth_jpy"])
+        orch.loss_learner = LossLearningEngine(state_path="")
+        orch._pending_entry_signals["eth_jpy"] = DirectionalSignal(
+            pair="eth_jpy", action="SHORT", position_type="margin", conviction=0.8,
+            entry_price=290000.0, stop_loss_price=293480.0, take_profit_price=284780.0,
+            trend_alignment="BEARISH", rsi=68.5, trend_1h="BULLISH", trend_15m="BULLISH",
+        )
+        now = time.time()
+        open_review = _review(20000.0)
+        open_review.open_positions = [{"pair": "eth_jpy", "position_side": "short", "avg_price": 290000.0}]
+        orch._update_churn_guards(open_review, now)
+        orch._update_churn_guards(_review(19700.0), now + 600)
+
+        lesson = orch.loss_learner.lessons[-1]
+        self.assertTrue(lesson.is_loss)
+        self.assertAlmostEqual(lesson.entry_rsi, 68.5)
+        self.assertEqual((lesson.trend_4h, lesson.trend_1h, lesson.trend_15m), ("BEARISH", "BULLISH", "BULLISH"))
+        self.assertAlmostEqual(lesson.entry_price, 290000.0)
+        self.assertEqual(lesson.exit_reason, "EXCHANGE_STOP_OR_MANUAL")
+
+
 if __name__ == "__main__":
     unittest.main()
