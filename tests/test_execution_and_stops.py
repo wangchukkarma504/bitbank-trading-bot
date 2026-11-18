@@ -449,134 +449,46 @@ class TestBoundaryAndFaultRecovery(unittest.TestCase):
         self.assertIsNone(res)
         self.assertTrue(manager.emergency_covered)
 
-    def test_ratchet_idempotency_prevents_order_churn(self):
-        """Verify that evaluate_and_apply_ratchets does NOT cancel and replace stop orders
-        if the ratchet price level has not changed.
-        """
+    def test_trailing_stop_does_not_churn_orders(self):
+        """Once the trailing stop is placed, an unchanged price must not replace it."""
         from tradingbot.execution.risk_manager import RiskManager
         rm = RiskManager(self.client)
+        pos = {"pair": "sol_jpy", "position_side": "short", "amount": 1.0, "open_amount": "1.0",
+               "average_price": "10000.0", "avg_price": 10000.0}
 
-        pos = {
-            "pair": "sol_jpy",
-            "position_side": "short",
-            "amount": 1.0273,
-            "open_amount": "1.0273",
-            "average_price": "13820.2",
-            "avg_price": 13820.2,
-        }
+        res1 = rm.evaluate_and_apply_ratchets(pair="sol_jpy", position=pos, current_price=9830.0, client=self.client)
+        self.assertIsNotNone(res1)  # +1.7%: stop locks +1.0% at 9,900
+        mgr = rm.get_sync_manager("sol_jpy", self.client)
+        self.assertAlmostEqual(mgr.current_stop_level, 9900.0, places=1)
 
-        # Step 1: When price drops past +1.0%, stop is placed at 13,751.1 JPY
-        res1 = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=13660.0,
-            client=self.client,
-            be_trigger_pct=0.0048,
-            lock_trigger_pct=0.0080,
-        )
-        self.assertIsNotNone(res1)
-        oid1 = res1["order_id"]
-
-        # Step 2: On next tick with same or slightly moving price, stop level does NOT change
-        # Passing active_stops seeds or preserves existing stop level
-        active_stops = [{
-            "pair": "sol_jpy",
-            "side": "buy",
-            "trigger_price": 13751.1,
-            "status": "UNFILLED",
-            "order_id": oid1,
-            "amount": "1.0273",
-        }]
-        res2 = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=13655.0,
-            client=self.client,
-            active_stops=active_stops,
-            be_trigger_pct=0.0048,
-            lock_trigger_pct=0.0080,
-        )
-        # MUST BE NONE - no order replacement or churning!
+        active_stops = [{"pair": "sol_jpy", "side": "buy", "trigger_price": 9900.0, "status": "UNFILLED",
+                         "order_id": res1["order_id"], "amount": "1.0"}]
+        res2 = rm.evaluate_and_apply_ratchets(pair="sol_jpy", position=pos, current_price=9828.0,
+                                              client=self.client, active_stops=active_stops)
         self.assertIsNone(res2)
+        self.assertEqual(mgr.current_stop_id, res1["order_id"])
 
-        # Confirm manager stop ID has NOT changed
-        mgr = rm.get_sync_manager("sol_jpy", self.client)
-        self.assertEqual(mgr.current_stop_id, oid1)
-
-    def test_multi_tier_dynamic_trailing_ratchets(self):
-        """Verify that evaluate_and_apply_ratchets protects small wins cleanly
-        through BE (+0.48% -> +0.22%), Early Profit-Lock (+0.80% -> +0.40%),
-        and dynamic 1.0% trailing once gain >= +1.6%.
-        """
+    def test_trailing_stop_tiers(self):
+        """No stop movement below +1.6%; from there the stop locks profit and follows the price."""
         from tradingbot.execution.risk_manager import RiskManager
         rm = RiskManager(self.client)
-
-        pos = {
-            "pair": "sol_jpy",
-            "position_side": "short",
-            "amount": 1.0,
-            "open_amount": "1.0",
-            "average_price": "10000.0",
-            "avg_price": 10000.0,
-        }
-
-        # Case 1: +0.30% (9,970) -> Too early to choke, no ratchet yet
-        res_noise = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=9970.0,
-            client=self.client,
-        )
-        self.assertIsNone(res_noise)
-
-        # Early ratchets are off by default: +0.90% leaves the initial stop untouched
-        self.assertIsNone(rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy", position=pos, current_price=9910.0, client=self.client,
-        ))
-
-        # Case 2 (early ratchets explicitly enabled): +0.55% (9,945) -> Fee-covered BE ratchet: 10000 * 0.9975 = 9,975.0 (+0.25% locked)
-        res_be = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=9945.0,
-            client=self.client,
-            be_trigger_pct=0.0048,
-            lock_trigger_pct=0.0080,
-        )
-        self.assertIsNotNone(res_be)
+        pos = {"pair": "sol_jpy", "position_side": "short", "amount": 1.0, "open_amount": "1.0",
+               "average_price": "10000.0", "avg_price": 10000.0}
         mgr = rm.get_sync_manager("sol_jpy", self.client)
-        self.assertAlmostEqual(mgr.current_stop_level, 9975.0, places=1)
 
-        # Case 3: +0.90% (9,910) -> Early Profit-Lock: 10000 * 0.996 = 9,960.0 (+0.40% locked)
-        res_early = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=9910.0,
-            client=self.client,
-            be_trigger_pct=0.0048,
-            lock_trigger_pct=0.0080,
-        )
-        self.assertIsNotNone(res_early)
-        self.assertAlmostEqual(mgr.current_stop_level, 9960.0, places=1)
+        for px in (9970.0, 9945.0, 9910.0, 9850.0):  # +0.3% .. +1.5%: the initial stop is left alone
+            self.assertIsNone(rm.evaluate_and_apply_ratchets(pair="sol_jpy", position=pos, current_price=px, client=self.client))
 
-        # Case 4: +2.20% (9,780) -> Dynamic 1.0% trail: max(9780 * 1.010, min_safe) vs floor -> 9780 * 1.010 = 9877.8, floored by +1.4% (9860.0)
-        res_tier3 = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=9780.0,
-            client=self.client,
-        )
-        self.assertIsNotNone(res_tier3)
+        # +2.20% (9,780): 1.0% trail would be 9,877.8, floored by the +1.4% lock (9,860.0)
+        self.assertIsNotNone(rm.evaluate_and_apply_ratchets(pair="sol_jpy", position=pos, current_price=9780.0, client=self.client))
         self.assertAlmostEqual(mgr.current_stop_level, 9860.0, places=1)
 
-        # Case 5: +6.00% (9,400) -> Dynamic 1.0% trail: 9400 * 1.010 = 9494.0
-        res_tier5 = rm.evaluate_and_apply_ratchets(
-            pair="sol_jpy",
-            position=pos,
-            current_price=9400.0,
-            client=self.client,
-        )
-        self.assertIsNotNone(res_tier5)
+        # +6.00% (9,400): 1.0% trail = 9,494.0
+        self.assertIsNotNone(rm.evaluate_and_apply_ratchets(pair="sol_jpy", position=pos, current_price=9400.0, client=self.client))
+        self.assertAlmostEqual(mgr.current_stop_level, 9494.0, places=1)
+
+        # A pullback never loosens the stop
+        self.assertIsNone(rm.evaluate_and_apply_ratchets(pair="sol_jpy", position=pos, current_price=9450.0, client=self.client))
         self.assertAlmostEqual(mgr.current_stop_level, 9494.0, places=1)
 
 

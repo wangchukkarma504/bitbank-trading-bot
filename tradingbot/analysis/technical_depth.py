@@ -5,7 +5,7 @@ calculates top-20 order book depth ratios, and identifies Support and Resistance
 """
 
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from tradingbot.models import Candle, OrderBookDepth, RsiDivergence, TechnicalDepthResult
 from tradingbot.analysis.market_trend import (

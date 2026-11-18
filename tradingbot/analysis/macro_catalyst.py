@@ -126,7 +126,6 @@ def score_headlines(headlines: List[Tuple[str, str]]) -> Tuple[float, List[Catal
 class MacroCatalystAnalyst:
     """Fetches and caches live Fear & Greed + RSS news catalysts for market predictions."""
 
-    CACHE_TTL_SEC: float = 300.0  # Refresh every 5 minutes
 
     def __init__(self, cache_ttl_sec: float = 300.0):
         self.cache_ttl_sec = cache_ttl_sec

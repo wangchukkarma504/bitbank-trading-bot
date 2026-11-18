@@ -6,8 +6,9 @@
 
 ## Autonomous Mandate & Strategy Execution
 - **Full Delegation:** Execute trades autonomously across both Long (spot) and Short (margin) setups without requiring manual step-by-step user confirmation.
-- **Long Trading:** Managed by `tradingbot.bot` (4h EMA30/90 crossover, 4h EMA200 trend filter, 4-ATR trailing stop). Longs only enter when BTC regime confirms an uptrend.
-- **Short Trading:** Managed by `short_limit.py` (patient maker limit shorts into resistance during confirmed 4h downtrends). Always utilize maker orders to capture the -0.02% maker rebate rather than paying taker fees.
+- **Trading engine:** one process, `python3 -m tradingbot.server` (`tradingbot/orchestrator.py`), one position at a time.
+- **Short Trading (main rule):** margin short only when the 4h trend is down, the 1h EMA20 is below the 1h EMA50 and the 15m RSI is 65 or higher. Maker limit entry in three steps (50% / 20% / 30%), exchange stop 1.2% above entry, no fixed target: from +1.6% a trailing stop locks profit and follows the price.
+- **Long Trading:** spot longs only when the BTC regime is bullish (above the 4h EMA200).
 
 ## Capital Preservation & Risk Controls (Non-Negotiable)
 1. **Exchange-Side Stops:** Every margin short MUST have an active exchange-side stop order placed immediately upon fill. Never leave naked positions.

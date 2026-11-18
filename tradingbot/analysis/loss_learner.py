@@ -6,7 +6,7 @@ WEAK_CONVICTION_ENTRY, TREND_REVERSAL_EXHAUSTION), persists lessons to disk,
 and applies bounded, safe parameter adaptations to prevent repeating the same mistake.
 """
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import json
 import logging
 import os
@@ -248,10 +248,3 @@ class LossLearningEngine:
         if (side == "short" and depth_ratio >= 1.8) or (side == "long" and depth_ratio <= 0.55):
             return max(0.0, round(sig_conviction - 0.10, 3))
         return sig_conviction
-
-    def get_latest_lesson_summary(self) -> Optional[str]:
-        if not self.lessons:
-            return None
-        last = self.lessons[-1]
-        tag = "LOSS" if last.is_loss else "WIN"
-        return f"[{tag}] {last.pair} {last.pnl_jpy:+,.0f} JPY ({last.root_cause}) -> {last.fix_applied}"

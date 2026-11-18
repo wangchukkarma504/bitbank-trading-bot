@@ -59,7 +59,6 @@ class TestAntiChurnGuards(unittest.TestCase):
         orch.trend_analyst.evaluate_btc_regime = MagicMock(return_value=False)
         orch.macro_analyst.analyze = MagicMock(return_value=None)
         orch.directional_strategist.evaluate_pair = MagicMock(return_value=_make_short_signal("xrp_jpy"))
-        orch.dashboard.render = MagicMock(return_value="OK")
         return orch
 
     def test_post_close_global_cooldown_blocks_immediate_reentry(self):

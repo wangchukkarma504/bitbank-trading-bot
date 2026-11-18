@@ -22,6 +22,20 @@ An autonomous, regime-gated Spot Long and Margin Short trading system for the **
 
 ---
 
+## Strategy and settings
+
+One position at a time. Runtime switches live in `bot_config.json` (not committed).
+
+- **Short entry rule:** 4h trend down, 1h EMA20 below 1h EMA50, 15m RSI >= 65. Never shorts a 4h uptrend.
+- **Gradual entry (`scale_in`):** 50% of the planned size at the entry price, then 20% and 30% resting at better prices, 35% and 65% of the way to the stop. Unfilled steps are cancelled when the position closes or reaches +1.5%.
+- **Stop:** exchange-side stop 1.2% from entry, resized as steps fill, never moved away.
+- **Exit (`run_winners`):** no fixed target. From +1.6% the trailing stop locks +1.0% and follows the price. With `run_winners` off, the position closes at +1.8%.
+- **Size:** `leverage_factor` (capped at 1.95x) and `max_risk_pct_per_trade` (share of equity lost at a stop-out; 1.0 disables the cap).
+- **Brakes:** `equity_floor_jpy`, a 3% daily loss limit, a pause after 2 consecutive losses, and a per-setup learner (`learner_state.json`) that halves or blocks setups that keep losing.
+- **News override:** `news_override.json` forces one trade in the direction of a confirmed market-wide shock, with a 2.0% stop.
+
+---
+
 ## One-Command Install & Run
 
 Clone the repository and run `install_and_run.sh`:

@@ -15,7 +15,6 @@ Enforces:
 - Trailing ratchets: Break-even ratchet and Profit-lock ratchet.
 """
 
-from dataclasses import dataclass
 import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,10 +23,8 @@ from tradingbot.bitbank import BitbankError
 from tradingbot.models import (
     MARGIN_PAIRS,
     SPOT_ONLY_PAIRS,
-    SUPPORTED_PAIRS,
     PairConfig,
     SizingPlan,
-    StopOrderSpec,
 )
 
 
@@ -366,26 +363,14 @@ class RiskManager:
         current_price: float,
         client=None,
         active_stops: Optional[List[Dict[str, Any]]] = None,
-        be_trigger_pct: Optional[float] = None,    # Early break-even ratchet: off by default (see note below)
-        lock_trigger_pct: Optional[float] = None,  # Early profit-lock ratchet: off by default
-        lock_profit_pct: float = 0.0040,           # Profit locked when lock_trigger_pct is set
-        trail_arm_pct: Optional[float] = None,     # Profit-lock trail: gain at which the stop moves to profit
-        trail_lock_pct: float = 0.0020,            # ...minimum gain locked once armed (covers the stop's fees)
-        trail_dist_pct: float = 0.0050,            # ...then the stop follows the price at this distance
-        min_step_pct: float = 0.0005,              # Smallest stop improvement worth a new order (avoids churn)
     ) -> Optional[Dict[str, Any]]:
         """Evaluate unrealized PnL and ratchet the protective stop closer to protect capital.
         Uses place-before-cancel sync_stop to maintain continuous exchange protection.
         Prevents order churn by rounding target stop levels and requiring strictly improved price levels.
 
-        The early ratchets (+0.48% -> lock +0.25%, +0.80% -> lock +0.40%) are disabled by default: in the
-        150-day replay they stopped winners out on normal pullbacks and cut the average trade by a third or
-        more. Only the >= +1.6% trailing lock stays on. Pass the trigger values explicitly to re-enable them.
+        Only the >= +1.6% trailing lock exists. Earlier break-even / profit-lock ratchets were removed: in
+        the 150-day replay they stopped winners out on normal pullbacks and cut the average trade by a third.
         """
-        if be_trigger_pct is None:
-            be_trigger_pct = float("inf")
-        if lock_trigger_pct is None:
-            lock_trigger_pct = float("inf")
         active_client = client or self.client
         side = position.get("position_side", "short")
         pos_type = position.get("position_type", "margin")
@@ -464,22 +449,7 @@ class RiskManager:
 
                 new_stop = max(min_safe_stop, min(trail_stop, min_lock))
 
-            # Early Profit-Lock Ratchet (+1.2% gain -> lock +0.60% profit)
-            elif gain_pct >= lock_trigger_pct:
-                new_stop = max(min_safe_stop, round(avg_px * (1.0 - lock_profit_pct), pd))
-
-            # Fee-Covered Break-Even Ratchet (+0.48% gain -> lock +0.25% to cover 0.12% taker stop fee + slippage)
-            elif gain_pct >= be_trigger_pct:
-                new_stop = max(min_safe_stop, round(avg_px * (1.0 - 0.0025), pd))
-
-            # Profit-lock trail: once in profit past the fees, the stop sits on the profit side and only
-            # moves further into profit, so a winning trade cannot turn back into a loss.
-            if trail_arm_pct is not None and gain_pct >= trail_arm_pct:
-                locked = max(trail_lock_pct, gain_pct - trail_dist_pct)
-                trail_stop = max(min_safe_stop, round(avg_px * (1.0 - locked), pd))
-                new_stop = trail_stop if new_stop is None else min(new_stop, trail_stop)
-
-            step = max(1e-6, avg_px * min_step_pct) if trail_arm_pct is not None else 1e-6
+            step = 1e-6
             if new_stop is not None and (current_stop is None or new_stop < current_stop - step):
                 return mgr.sync_stop(amt_str, new_stop, position_side=side)
 
@@ -502,20 +472,7 @@ class RiskManager:
 
                 new_stop = min(max_safe_stop, max(trail_stop, min_lock))
 
-            # Early Profit-Lock Ratchet (+1.2% gain -> lock +0.60% profit)
-            elif gain_pct >= lock_trigger_pct:
-                new_stop = min(max_safe_stop, round(avg_px * (1.0 + lock_profit_pct), pd))
-
-            # Fee-Covered Break-Even Ratchet (+0.48% gain -> lock +0.25% to cover 0.12% taker stop fee + slippage)
-            elif gain_pct >= be_trigger_pct:
-                new_stop = min(max_safe_stop, round(avg_px * (1.0 + 0.0025), pd))
-
-            if trail_arm_pct is not None and gain_pct >= trail_arm_pct:
-                locked = max(trail_lock_pct, gain_pct - trail_dist_pct)
-                trail_stop = min(max_safe_stop, round(avg_px * (1.0 + locked), pd))
-                new_stop = trail_stop if new_stop is None else max(new_stop, trail_stop)
-
-            step = max(1e-6, avg_px * min_step_pct) if trail_arm_pct is not None else 1e-6
+            step = 1e-6
             if new_stop is not None and (current_stop is None or new_stop > current_stop + step):
                 return mgr.sync_stop(amt_str, new_stop, position_side=stop_pos_side)
 

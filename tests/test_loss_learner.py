@@ -61,24 +61,6 @@ class TestLossLearner(unittest.TestCase):
         self.assertEqual(engine.pair_loss_streaks["sol_jpy"], 0)
         self.assertEqual(engine.get_pair_cooldown_multiplier("sol_jpy"), 1.0)
 
-    def test_dashboard_scales_milestones_and_shows_in_trade_pnl(self):
-        from tradingbot.dashboard.ascii_dashboard import render_ascii_dashboard
-        out = render_ascii_dashboard(
-            starting_budget=98874.1,
-            total_equity=101000.0,
-            open_positions=[{
-                "pair": "xrp_jpy",
-                "position_side": "short",
-                "open_amount": "100.0",
-                "avg_price": 155.0,
-                "last_price": 150.0,
-            }],
-        )
-        self.assertIn("2X Milestone  [¥200,000 JPY]", out)
-        self.assertIn("5X Milestone  [¥500,000 JPY]", out)
-        self.assertIn("10X Milestone [¥1,000,000 JPY]", out)
-        self.assertIn("In-Trade Unrealized   : +¥500.0", out)
-
 
 if __name__ == "__main__":
     unittest.main()

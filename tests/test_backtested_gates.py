@@ -114,7 +114,6 @@ class TestDailyLossLimit(unittest.TestCase):
         orch.loss_learner = LossLearningEngine(state_path="")
         orch.trend_analyst.evaluate_btc_regime = MagicMock(return_value=False)
         orch.macro_analyst.analyze = MagicMock(return_value=None)
-        orch.dashboard.render = MagicMock(return_value="OK")
         orch.directional_strategist.evaluate_pair = MagicMock(return_value=DirectionalSignal(
             pair="eth_jpy", action="SHORT", position_type="margin", conviction=0.9,
             entry_price=290000.0, stop_loss_price=293480.0, take_profit_price=284780.0,
@@ -197,7 +196,6 @@ class TestStressRegressions(unittest.TestCase):
         orch.loss_learner = LossLearningEngine(state_path="")
         orch.trend_analyst.evaluate_btc_regime = MagicMock(return_value=False)
         orch.macro_analyst.analyze = MagicMock(return_value=None)
-        orch.dashboard.render = MagicMock(return_value="OK")
         orch.directional_strategist.evaluate_pair = MagicMock(return_value=DirectionalSignal(
             pair="eth_jpy", action="NEUTRAL", position_type="none", conviction=0.1,
             entry_price=290000.0, stop_loss_price=0.0, take_profit_price=0.0,

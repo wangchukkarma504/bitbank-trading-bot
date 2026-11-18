@@ -45,7 +45,6 @@ class TestGradualEntry(unittest.TestCase):
         orch.loss_learner = LossLearningEngine(state_path="")
         orch.trend_analyst.evaluate_btc_regime = MagicMock(return_value=False)
         orch.macro_analyst.analyze = MagicMock(return_value=None)
-        orch.dashboard.render = MagicMock(return_value="OK")
         orch.directional_strategist.evaluate_pair = MagicMock(return_value=DirectionalSignal(
             pair="eth_jpy", action="SHORT", position_type="margin", conviction=0.95, entry_price=ENTRY,
             stop_loss_price=STOP, take_profit_price=281300.0, rsi=64.0, trend_1h="NEUTRAL",

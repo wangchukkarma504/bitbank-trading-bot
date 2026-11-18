@@ -22,30 +22,18 @@ import math
 import os
 import random
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 from tradingbot.bitbank import Bitbank, BitbankError
 from tradingbot.models import (
     MARGIN_PAIRS,
     SPOT_ONLY_PAIRS,
     SUPPORTED_PAIRS,
-    Candle,
-    MarketTrendResult,
-    WickAnalysisResult,
-    TechnicalDepthResult,
-    TrendAlignment,
-    WickType,
-    RsiDivergence,
-    RegimeType,
 )
-from tradingbot.analysis.market_trend import (
-    MarketTrendAnalyst,
-    evaluate_btc_macro_regime,
-)
+from tradingbot.analysis.market_trend import MarketTrendAnalyst
 from tradingbot.analysis.wick_anatomy import WickAnatomyAnalyst
 from tradingbot.analysis.technical_depth import TechnicalDepthAnalyst
 from tradingbot.analysis.macro_catalyst import MacroCatalystAnalyst, MacroCatalystReport
-from tradingbot.analysis.alt_momentum_scanner import AltcoinMomentumScanner, AltcoinBreakoutCandidate
 from tradingbot.analysis.loss_learner import LossLearningEngine
 from tradingbot.analysis.adaptive_learner import AdaptiveLearner
 from tradingbot.execution.position_reviewer import (
@@ -56,18 +44,7 @@ from tradingbot.execution.directional_strategist import (
     DirectionalStrategist,
     DirectionalSignal,
 )
-from tradingbot.execution.risk_manager import (
-    RiskManager,
-    StopSyncManager,
-    calculate_margin_short_size,
-    calculate_spot_long_size,
-)
-from tradingbot.dashboard.ascii_dashboard import (
-    AsciiDashboard,
-    calc_milestone_progress,
-    calc_target_ladder_progress,
-    render_ascii_dashboard,
-)
+from tradingbot.execution.risk_manager import RiskManager
 
 
 logger = logging.getLogger("TradingOrchestrator")
@@ -91,17 +68,10 @@ class TradingOrchestrator:
     CIRCUIT_BREAKER_PAUSE_SEC: float = 1800.0   # 30 min pause when circuit breaker trips
     CONSECUTIVE_LOSS_PAUSE_SEC: float = 7200.0  # 2 h pause after consecutive losses (stop-outs cluster in rallies)
     DAILY_LOSS_LIMIT_PCT: float = 0.03          # No new entries for the rest of the JST day once equity is down 3%
-    # Frequent mode: profit-lock trailing stop (arm at +0.60%, lock +0.20%, then trail 0.50% behind price).
-    # Arming earlier (+0.35%) raised the win rate but lost more per trade in the replay, so it arms later.
-    FREQ_TRAIL_ARM_PCT: float = 0.0060
-    FREQ_TRAIL_LOCK_PCT: float = 0.0020
-    FREQ_TRAIL_DIST_PCT: float = 0.0050
-    FREQ_MAX_RISK_PCT: float = 0.010            # 1% of equity per stop-out (half the selective rule's 2%)
-    FREQ_MAX_CONSECUTIVE_LOSSES: int = 3
-    FREQ_CONSECUTIVE_LOSS_PAUSE_SEC: float = 3600.0
     TP_MAKER_WAIT_SEC: float = 60.0             # How long a resting maker take-profit may wait before a market close
     RUN_WINNERS_BACKSTOP_PCT: float = 0.08      # Far target used when run_winners replaces the fixed take-profit
     SCALE_IN_TRANCHES: Tuple[float, ...] = (0.50, 0.20, 0.30)  # Share of the planned size per entry step
+    SCALE_IN_CANCEL_GAIN_PCT: float = 0.015     # Pull unfilled adds just before the trailing stop arms at +1.6%
     SCALE_IN_LEVELS: Tuple[float, ...] = (0.35, 0.65)          # Where the adds rest, as a share of the entry-to-stop distance
 
     def __init__(
@@ -117,7 +87,6 @@ class TradingOrchestrator:
         allow_counter_trend_longs: bool = False,
         daily_state_path: Optional[str] = None,
         news_override_path: Optional[str] = None,
-        frequent_mode: bool = False,
         equity_floor_jpy: Optional[float] = None,
         learner_state_path: Optional[str] = None,
     ):
@@ -138,12 +107,10 @@ class TradingOrchestrator:
         self.wick_analyst = WickAnatomyAnalyst(self.client)
         self.tech_analyst = TechnicalDepthAnalyst(self.client)
         self.macro_analyst = MacroCatalystAnalyst(cache_ttl_sec=300.0)
-        self.alt_scanner = AltcoinMomentumScanner(self.client)
         self.directional_strategist = DirectionalStrategist(
             self.client, allow_counter_trend_longs=self.allow_counter_trend_longs
         )
         self.risk_manager = RiskManager(self.client)
-        self.dashboard = AsciiDashboard(starting_budget=self.baseline_budget_jpy)
 
         # Runtime cycle state
         self.tick_count: int = 0
@@ -151,8 +118,6 @@ class TradingOrchestrator:
         self.last_review: Optional[PositionReviewResult] = None
         self.last_signals: Dict[str, DirectionalSignal] = {}
         self.last_macro_report: Optional[MacroCatalystReport] = None
-        self.last_alt_candidates: List[AltcoinBreakoutCandidate] = []
-        self._last_alt_scan_ts: float = 0.0
 
         # Anti-churn / circuit-breaker tracking
         self._active_tracked_positions: Dict[str, float] = {}
@@ -180,20 +145,14 @@ class TradingOrchestrator:
         self.equity_floor_hit: bool = False
         # Learns from each closed trade which setups to keep taking (None path = in memory only)
         self.learner = AdaptiveLearner(state_path=learner_state_path)
-        self.tuned_params: Dict[str, Any] = {}
         # Gradual entry for margin shorts: open SCALE_IN_TRANCHES[0] of the planned size, rest the remainder
         # at better prices between the entry and the stop. The stop price never moves away when adds fill.
         self.scale_in: bool = False
         # Selective mode: hold a winning short past the 1.8% target and let the trailing stop end the trade
         self.run_winners: bool = False
         self._scale_plans: Dict[str, Dict[str, Any]] = {}
-        self.frequent_mode: bool = False
         self._leverage_override: Optional[float] = None
         self._max_risk_override: Optional[float] = None
-        self._selective_limits = (
-            self.risk_manager.MAX_RISK_PCT_PER_TRADE, self.MAX_CONSECUTIVE_LOSSES, self.CONSECUTIVE_LOSS_PAUSE_SEC
-        )
-        self.set_frequent_mode(frequent_mode)
         # Operator news override file: {"bias": "BEARISH"|"BULLISH", "set_at": epoch, "expires_at": epoch, "headline": str}
         self.news_override_path: Optional[str] = news_override_path
         self.news_override: Optional[Dict[str, Any]] = None
@@ -265,35 +224,6 @@ class TradingOrchestrator:
         except Exception as e:
             self.logger.warning(f"Failed to save daily risk state to {self.daily_state_path}: {e}")
 
-    def set_frequent_mode(self, enabled: bool) -> None:
-        """Switch between the selective rule (default, profitable in replay) and frequent mode (~4 trades/day)."""
-        self.frequent_mode = bool(enabled)
-        self.directional_strategist.frequent_mode = self.frequent_mode
-        risk, max_losses, pause = self._selective_limits
-        if self.frequent_mode:
-            risk, max_losses, pause = (
-                self.FREQ_MAX_RISK_PCT, self.FREQ_MAX_CONSECUTIVE_LOSSES, self.FREQ_CONSECUTIVE_LOSS_PAUSE_SEC
-            )
-        self.risk_manager.MAX_RISK_PCT_PER_TRADE = risk
-        self.MAX_CONSECUTIVE_LOSSES = max_losses
-        self.CONSECUTIVE_LOSS_PAUSE_SEC = pause
-        self._apply_sizing_overrides()
-
-    def apply_tuned_params(self, params: Dict[str, Any]) -> None:
-        """Apply settings chosen by the daily auto-tuner (frequent mode's entry thresholds and trailing stop)."""
-        strat = self.directional_strategist
-        if "short_rsi_min" in params:
-            strat.FREQ_SHORT_RSI_MIN = float(params["short_rsi_min"])
-        if "long_rsi_max" in params:
-            strat.FREQ_LONG_RSI_MAX = float(params["long_rsi_max"])
-        if "require_1h" in params:
-            strat.freq_require_1h = bool(params["require_1h"])
-        if "trail_arm_pct" in params:
-            self.FREQ_TRAIL_ARM_PCT = float(params["trail_arm_pct"])
-        if "trail_dist_pct" in params:
-            self.FREQ_TRAIL_DIST_PCT = float(params["trail_dist_pct"])
-        self.tuned_params = dict(params)
-
     def _signal_bucket(self, sig: Optional[DirectionalSignal], pair: str, side: str) -> str:
         return AdaptiveLearner.bucket_key(
             pair, side, float(getattr(sig, "rsi", 0.0) or 0.0) if sig else 0.0,
@@ -302,16 +232,15 @@ class TradingOrchestrator:
 
     def set_sizing_overrides(self, leverage: Optional[float] = None, max_risk_pct: Optional[float] = None) -> None:
         """Operator overrides for position size: leverage (capped at the exchange maximum) and the per-trade
-        risk cap. None keeps the mode's default. A risk cap of 1.0 or more disables the cap (full leverage)."""
+        risk cap. None keeps the default. A risk cap of 1.0 or more disables the cap (full leverage)."""
         self._leverage_override = leverage if leverage and leverage > 0 else None
         self._max_risk_override = max_risk_pct if max_risk_pct and max_risk_pct > 0 else None
-        self.set_frequent_mode(self.frequent_mode)
+        self._apply_sizing_overrides()
 
     def _apply_sizing_overrides(self) -> None:
         rm = self.risk_manager
         rm.SHORT_LEVERAGE_FACTOR = min(rm.MAX_EXCHANGE_LEVERAGE, self._leverage_override or type(rm).SHORT_LEVERAGE_FACTOR)
-        if self._max_risk_override:
-            rm.MAX_RISK_PCT_PER_TRADE = self._max_risk_override
+        rm.MAX_RISK_PCT_PER_TRADE = self._max_risk_override or type(rm).MAX_RISK_PCT_PER_TRADE
 
     def _cancel_scale_adds(self, pair: str, reason: str) -> None:
         """Cancel the unfilled add orders of a gradual entry and forget its plan."""
@@ -707,7 +636,7 @@ class TradingOrchestrator:
             self.logger.warning(f"Failed to evaluate BTC macro regime: {e}")
 
         # =====================================================================
-        # STEP 2B: Live Macro & News Catalyst Predictor + 60+ Altcoin Radar (5-min cached)
+        # STEP 2B: Live Macro & News Catalyst Predictor (5-min cached)
         # =====================================================================
         macro_report: Optional[MacroCatalystReport] = self.last_macro_report
         try:
@@ -715,14 +644,6 @@ class TradingOrchestrator:
             self.last_macro_report = macro_report
         except Exception as e:
             self.logger.warning(f"Macro catalyst scan failed (using fallback): {e}")
-
-        now_sec = time.time()
-        if (now_sec - self._last_alt_scan_ts) >= 300.0 and hasattr(self.client, "tickers"):
-            try:
-                self.last_alt_candidates = self.alt_scanner.scan_all_pairs(max_detailed_candidates=5)
-                self._last_alt_scan_ts = now_sec
-            except Exception as e:
-                self.logger.warning(f"Altcoin 60+ pair breakout scan failed: {e}")
 
         # =====================================================================
         # STEP 3 & 4: Roles 4 & 5 (Wick Anatomy & Technical Depth Analysts)
@@ -787,7 +708,7 @@ class TradingOrchestrator:
             if not tp_hit and side == "short" and avg_px > 0:
                 plan_tp = (self._active_position_meta.get(pair) or {}).get("tp_pct")
                 target_px = avg_px * (1.0 - (plan_tp or self.directional_strategist.SHORT_TP_PCT))
-                if self.run_winners and not self.frequent_mode and pair in MARGIN_PAIRS:
+                if self.run_winners and pair in MARGIN_PAIRS:
                     # No fixed target: from +1.6% the trailing stop locks profit and follows the price down,
                     # so a strong move is held until it turns. Only a far backstop target remains.
                     target_px = avg_px * (1.0 - self.RUN_WINNERS_BACKSTOP_PCT)
@@ -826,9 +747,8 @@ class TradingOrchestrator:
             scale_plan = self._scale_plans.get(pair)
             if scale_plan and not self.dry_run and side == "short":
                 gain_now = ((avg_px - last_px) / avg_px) if (avg_px > 0 and last_px > 0) else 0.0
-                arm = self.FREQ_TRAIL_ARM_PCT if self.frequent_mode else 0.016
                 mismatch = avg_px > 0 and float(scale_plan.get("stop_px") or 0.0) > avg_px * 1.0125
-                if tp_hit or mismatch or gain_now >= arm - 0.001:
+                if tp_hit or mismatch or gain_now >= self.SCALE_IN_CANCEL_GAIN_PCT:
                     self._cancel_scale_adds(
                         pair, "closing" if tp_hit else ("plan does not match the open position" if mismatch else "trade is in profit")
                     )
@@ -936,13 +856,6 @@ class TradingOrchestrator:
                             self.logger.warning(f"Failed to cancel resting take-profit {o.get('order_id')} on {pair}: {e}")
                 self._tp_limit_since.pop(pair, None)
                 # Apply trailing ratchets (only the >= +1.6% trailing lock is active by default)
-                trail_kwargs: Dict[str, Any] = {}
-                if self.frequent_mode:
-                    trail_kwargs = {
-                        "trail_arm_pct": self.FREQ_TRAIL_ARM_PCT,
-                        "trail_lock_pct": self.FREQ_TRAIL_LOCK_PCT,
-                        "trail_dist_pct": self.FREQ_TRAIL_DIST_PCT,
-                    }
                 try:
                     self.risk_manager.evaluate_and_apply_ratchets(
                         pair=pair,
@@ -950,7 +863,6 @@ class TradingOrchestrator:
                         current_price=last_px,
                         client=self.client,
                         active_stops=review_res.active_stops,
-                        **trail_kwargs,
                     )
                 except Exception as e:
                     self.logger.warning(f"Trailing ratchet check failed on {pair}: {e}")
@@ -1174,56 +1086,9 @@ class TradingOrchestrator:
                         f"entry={best_candidate.entry_price:,.1f}, stop={best_candidate.stop_loss_price:,.1f})"
                     )
 
-        # =====================================================================
-        # STEP 7: Render ASCII Easy Dashboard
-        # =====================================================================
-        dashboard_output = self.dashboard.render(
-            client=self.client,
-            position_review=review_res,
-            signals=signals,
-            open_positions=review_res.open_positions,
-            active_stops=review_res.active_stops,
-            total_equity=review_res.total_equity_jpy,
-            macro_report=macro_report,
-            alt_candidates=self.last_alt_candidates,
-        )
-
         return {
             "tick": self.tick_count,
             "review": review_res,
             "signals": signals,
             "macro_report": macro_report,
-            "dashboard": dashboard_output,
         }
-
-    def run_loop(
-        self,
-        interval: float = 10.0,
-        once: bool = False,
-        max_ticks: Optional[int] = None,
-    ) -> None:
-        """Run coordinated autonomous multi-role trading loop."""
-        print(f"\nStarting Bitbank Autonomous Multi-Role Orchestrator [{self.mode.upper()} MODE]...")
-        print(f"Monitoring pairs: {', '.join(self.pairs)}")
-        print(f"Tick interval: {interval:.1f}s | Baseline budget: ¥{self.baseline_budget_jpy:,.0f} JPY\n")
-
-        while True:
-            try:
-                res = self.tick()
-                print(res["dashboard"])
-
-                if once:
-                    break
-
-                if max_ticks is not None and self.tick_count >= max_ticks:
-                    break
-
-                time.sleep(interval)
-            except KeyboardInterrupt:
-                print("\nReceived user interrupt. Shutting down Trading Orchestrator gracefully.")
-                break
-            except Exception as e:
-                self.logger.error(f"Error during tick execution: {e}", exc_info=True)
-                if once:
-                    raise
-                time.sleep(interval)

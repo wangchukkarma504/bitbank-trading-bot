@@ -8,9 +8,9 @@ unprotected / naked positions.
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
-from tradingbot.models import MARGIN_PAIRS, SPOT_ONLY_PAIRS, SUPPORTED_PAIRS
+from tradingbot.models import SPOT_ONLY_PAIRS, SUPPORTED_PAIRS
 
 
 @dataclass

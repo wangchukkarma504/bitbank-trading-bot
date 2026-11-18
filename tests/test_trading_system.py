@@ -59,11 +59,6 @@ from tests.test_execution_and_stops import (
     calculate_margin_short_size,
     calculate_spot_long_size,
 )
-from tests.test_dashboard import (
-    calc_milestone_progress,
-    calc_target_ladder_progress,
-    render_ascii_dashboard,
-)
 
 
 class TestSignalToStopLifecycle(unittest.TestCase):
@@ -219,11 +214,6 @@ class TestSignalToStopLifecycle(unittest.TestCase):
         self.assertGreater(self.client.realized_pnl_jpy, 0.0)
         self.assertGreater(self.client.calculate_total_equity(), 10142.30)
 
-        # Verify milestone progress advanced
-        new_equity = self.client.calculate_total_equity()
-        prog, rem, _ = calc_milestone_progress(new_equity, 10001.0, 20000.0)
-        self.assertGreater(prog, 1.41)
-
     def test_macro_gating_suppresses_spot_longs_in_bear_regime(self):
         # When BTC is below EMA200, Directional Strategist MUST block Spot Longs
         btc_candles_bear = [
@@ -246,7 +236,7 @@ class TestSignalToStopLifecycle(unittest.TestCase):
 
 
 class TestMultiTickSimulation(unittest.TestCase):
-    """Tier 4: Multi-tick live simulation verifying safety invariants and continuous dashboard output."""
+    """Tier 4: Multi-tick live simulation verifying safety invariants."""
 
     def setUp(self):
         self.client = MockBitbankClient(starting_cash_jpy=10142.30, baseline_budget_jpy=10001.00)
@@ -294,9 +284,6 @@ class TestMultiTickSimulation(unittest.TestCase):
                 stop_mgr.sync_stop(qty_str, trigger_price=initial_px)
 
             # 5. Render ASCII Dashboard without exception
-            dashboard_output = render_ascii_dashboard(self.client)
-            self.assertIn("BITBANK CRYPTO BOT", dashboard_output)
-            self.assertIn("Capital Milestones", dashboard_output.title())
 
     def test_fault_injection_during_simulation(self):
         # 1. Nonce collision handling
