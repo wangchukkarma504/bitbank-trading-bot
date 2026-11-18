@@ -18,6 +18,7 @@ Resilience & Error Handling:
 
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -99,6 +100,8 @@ class TradingOrchestrator:
     FREQ_MAX_CONSECUTIVE_LOSSES: int = 3
     FREQ_CONSECUTIVE_LOSS_PAUSE_SEC: float = 3600.0
     TP_MAKER_WAIT_SEC: float = 60.0             # How long a resting maker take-profit may wait before a market close
+    SCALE_IN_TRANCHES: Tuple[float, ...] = (0.50, 0.20, 0.30)  # Share of the planned size per entry step
+    SCALE_IN_LEVELS: Tuple[float, ...] = (0.35, 0.65)          # Where the adds rest, as a share of the entry-to-stop distance
 
     def __init__(
         self,
@@ -177,6 +180,10 @@ class TradingOrchestrator:
         # Learns from each closed trade which setups to keep taking (None path = in memory only)
         self.learner = AdaptiveLearner(state_path=learner_state_path)
         self.tuned_params: Dict[str, Any] = {}
+        # Gradual entry for margin shorts: open SCALE_IN_TRANCHES[0] of the planned size, rest the remainder
+        # at better prices between the entry and the stop. The stop price never moves away when adds fill.
+        self.scale_in: bool = False
+        self._scale_plans: Dict[str, Dict[str, Any]] = {}
         self.frequent_mode: bool = False
         self._leverage_override: Optional[float] = None
         self._max_risk_override: Optional[float] = None
@@ -302,6 +309,35 @@ class TradingOrchestrator:
         rm.SHORT_LEVERAGE_FACTOR = min(rm.MAX_EXCHANGE_LEVERAGE, self._leverage_override or type(rm).SHORT_LEVERAGE_FACTOR)
         if self._max_risk_override:
             rm.MAX_RISK_PCT_PER_TRADE = self._max_risk_override
+
+    def _cancel_scale_adds(self, pair: str, reason: str) -> None:
+        """Cancel the unfilled add orders of a gradual entry and forget its plan."""
+        plan = self._scale_plans.pop(pair, None)
+        if not plan:
+            return
+        for oid in plan.get("add_ids", []):
+            try:
+                self.client.cancel(pair, oid)
+            except Exception:
+                pass  # already filled or cancelled
+        if plan.get("add_ids"):
+            self.logger.info(f"Gradual entry on {pair}: remaining add orders cancelled ({reason}).")
+
+    def _place_scale_adds(self, pair: str, plan: Dict[str, Any], last_px: float) -> None:
+        """Rest the remaining entry steps at better prices once the first step has opened the position."""
+        plan["placed"] = True
+        for amt_str, px in plan.get("adds", []):
+            if last_px >= px:
+                continue  # price is already through this level; a post-only order would be rejected
+            try:
+                res = self.risk_manager.place_maker_limit_order(
+                    pair=pair, side="sell", amount=amt_str, price=px, position_side="short", client=self.client,
+                )
+                if res.get("order_id") is not None:
+                    plan["add_ids"].append(res["order_id"])
+                    self.logger.info(f"Gradual entry on {pair}: add order qty={amt_str} resting at {px}")
+            except Exception as e:
+                self.logger.warning(f"Gradual entry on {pair}: add order at {px} was not accepted: {e}")
 
     @staticmethod
     def _plan_pct(sig: Optional[DirectionalSignal], field: str) -> Optional[float]:
@@ -523,6 +559,7 @@ class TradingOrchestrator:
         self.last_review = review_res
         # Pairs that had a position on the previous clean review: if one is flat now, its stop is a leftover
         previously_open_pairs = set(self._active_tracked_positions)
+        emergency_close_attempted = False
         if not review_query_failed:
             self._update_churn_guards(review_res, now_ts=self.last_tick_time)
 
@@ -550,6 +587,21 @@ class TradingOrchestrator:
                 stop_pct = (self._active_position_meta.get(pair) or {}).get("stop_pct") or self.directional_strategist.STOP_PCT
                 planned = ref_px * (1.0 + stop_pct) if side == "short" else ref_px * (1.0 - stop_pct)
                 stop_trig = self.loss_learner.adjust_stop_price(ref_px, planned, side)
+                # Gradual entry: the average price improves as adds fill, but the stop stays at the planned
+                # price (or at a tighter stop already on the exchange); it is only resized, never moved away.
+                scale_plan = self._scale_plans.get(pair)
+                if scale_plan and side == "short" and float(scale_plan.get("stop_px") or 0.0) > stop_trig:
+                    # The plan's stop is further away than this position allows: it belongs to another entry
+                    self._cancel_scale_adds(pair, "plan does not match the open position")
+                elif scale_plan and side == "short" and scale_plan.get("stop_px"):
+                    stop_trig = float(scale_plan["stop_px"])
+                    for s in review_res.active_stops:
+                        try:
+                            trig = float(s.get("trigger_price", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            continue
+                        if s.get("pair") == pair and s.get("side") == "buy" and 0 < trig < stop_trig:
+                            stop_trig = trig
                 stop_breached = last_px > 0 and (
                     (side == "short" and last_px >= stop_trig) or (side != "short" and last_px <= stop_trig)
                 )
@@ -560,6 +612,8 @@ class TradingOrchestrator:
                         f"Unprotected {pair} {side} is already past its planned stop ({last_px} vs {stop_trig:.4f}); closing at market."
                     )
                     self._last_exit_reason[pair] = "STOP_ALREADY_BREACHED"
+                    emergency_close_attempted = True  # the close may fail: no new entry on this tick
+                    self._cancel_scale_adds(pair, "position closed at market")
                     self.risk_manager.emergency_market_cover(pair, client=self.client)
                     review_res.open_positions = [p for p in review_res.open_positions if p.get("pair") != pair]
                     continue
@@ -567,13 +621,33 @@ class TradingOrchestrator:
                 if not self.dry_run:
                     self.logger.info(f"Attaching immediate protective stop on naked {pair} {side} at {stop_trig}...")
                     try:
-                        self.risk_manager.attach_protective_stop(
+                        new_stop = self.risk_manager.attach_protective_stop(
                             pair=pair,
                             amount=amt_str,
                             trigger_price=stop_trig,
                             position_side=stop_pos_side,
                             client=self.client,
                         )
+                        # The new stop covers the whole position: remove any smaller stop it replaces (a gradual
+                        # entry grows the position) and let the rest of this tick see the stop that now exists.
+                        new_id = new_stop.get("order_id") if isinstance(new_stop, dict) else None
+                        if new_id is not None:
+                            new_side = "buy" if side == "short" else "sell"
+                            kept = []
+                            for s in review_res.active_stops:
+                                if s.get("pair") != pair or s.get("side") != new_side:
+                                    kept.append(s)  # another pair, or the stop of an opposite holding on this pair
+                                elif s.get("order_id") not in (None, new_id):
+                                    try:
+                                        self.client.cancel(pair, s.get("order_id"))
+                                    except Exception:
+                                        pass  # already cancelled by the stop manager
+                            kept.append({
+                                "pair": pair, "order_id": new_id, "side": new_side,
+                                "type": "stop", "status": "INACTIVE", "trigger_price": str(stop_trig),
+                                "remaining_amount": amt_str,
+                            })
+                            review_res.active_stops = kept
                     except Exception as e:
                         self.logger.error(f"Failed to place protective stop on {pair}: {e}. Triggering emergency cover.")
                         self.risk_manager.emergency_market_cover(pair, client=self.client)
@@ -740,6 +814,20 @@ class TradingOrchestrator:
                     tp_hit = True
                     is_emergency_close = True
 
+            # Gradual entry: place the adds once the position exists; pull them when the trade is about to
+            # lock profit (the stop then moves below them) or is being closed.
+            scale_plan = self._scale_plans.get(pair)
+            if scale_plan and not self.dry_run and side == "short":
+                gain_now = ((avg_px - last_px) / avg_px) if (avg_px > 0 and last_px > 0) else 0.0
+                arm = self.FREQ_TRAIL_ARM_PCT if self.frequent_mode else 0.016
+                mismatch = avg_px > 0 and float(scale_plan.get("stop_px") or 0.0) > avg_px * 1.0125
+                if tp_hit or mismatch or gain_now >= arm - 0.001:
+                    self._cancel_scale_adds(
+                        pair, "closing" if tp_hit else ("plan does not match the open position" if mismatch else "trade is in profit")
+                    )
+                elif not scale_plan.get("placed") and last_px > 0:
+                    self._place_scale_adds(pair, scale_plan, last_px)
+
             if tp_hit:
                 self._last_exit_reason[pair] = (
                     "FORCE_PROFIT_CLOSE" if force_tp_hit else ("EARLY_CUT_OR_SPOT_STOP" if is_emergency_close else "TAKE_PROFIT")
@@ -862,9 +950,20 @@ class TradingOrchestrator:
 
         # B. Stale Resting Limit Order Management & Entry Evaluation
         # Close orders handled above are not entry orders: keep them out of the stale-entry logic
+        # Gradual-entry adds: once their position is gone (stopped or closed) they must not open a new one.
+        # While the position is open they are managed above, not by the 10-minute stale-entry rule.
+        scale_ids = set()
+        if not review_incomplete:
+            for sp_pair in list(self._scale_plans):
+                plan = self._scale_plans[sp_pair]
+                if sp_pair in open_pairs_for_tp:
+                    scale_ids.update(plan.get("add_ids", []))
+                elif plan.get("placed") or (self.last_tick_time - plan.get("ts", 0.0)) > 900.0:
+                    self._cancel_scale_adds(sp_pair, "position closed" if plan.get("placed") else "entry never filled")
         active_limits = [
             o for o in review_res.active_orders
             if o.get("type") == "limit" and o.get("order_id") not in close_limit_ids
+            and o.get("order_id") not in scale_ids
         ]
         cancelled_any_limit = False
         if active_limits and not self.dry_run:
@@ -940,6 +1039,7 @@ class TradingOrchestrator:
             len(review_res.open_positions) == 0
             and len(active_limits) == 0
             and not cancelled_any_limit
+            and not emergency_close_attempted
             and not review_query_failed
             and not getattr(review_res, "has_query_error", False)
             and not churn_blocked
@@ -1007,9 +1107,35 @@ class TradingOrchestrator:
                         f"Skipping {best_candidate.pair} {best_candidate.action}: quantized qty={sizing_plan.formatted_amount} is zero."
                     )
                 elif not self.dry_run:
+                    entry_amount = sizing_plan.formatted_amount
+                    self._scale_plans.pop(best_candidate.pair, None)
+                    if (
+                        self.scale_in
+                        and best_candidate.action == "SHORT"
+                        and not getattr(best_candidate, "news_driven", False)
+                        and adj_stop_px > best_candidate.entry_price > 0
+                    ):
+                        cfg_s = MARGIN_PAIRS[best_candidate.pair]
+                        ad_s, pd_s = cfg_s.amount_digits, cfg_s.price_digits
+                        total = float(sizing_plan.formatted_amount)
+                        unit = 10 ** -ad_s
+                        steps = [math.floor(total * w / unit + 1e-9) * unit for w in self.SCALE_IN_TRANCHES]
+                        gap = adj_stop_px - best_candidate.entry_price
+                        adds = [
+                            (f"{amt:.{ad_s}f}", round(best_candidate.entry_price + lvl * gap, pd_s))
+                            for amt, lvl in zip(steps[1:], self.SCALE_IN_LEVELS) if amt > 0
+                        ]
+                        if steps[0] > 0 and adds:
+                            entry_amount = f"{steps[0]:.{ad_s}f}"
+                            self._scale_plans[best_candidate.pair] = {
+                                "stop_px": adj_stop_px, "adds": adds, "add_ids": [], "placed": False,
+                                "ts": self.last_tick_time,
+                            }
                     self.logger.info(
                         f"Executing maker limit order for {best_candidate.pair} {best_candidate.action}: "
-                        f"qty={sizing_plan.formatted_amount}, px={best_candidate.entry_price}"
+                        f"qty={entry_amount}, px={best_candidate.entry_price}"
+                        + (f" (step 1 of {len(self._scale_plans[best_candidate.pair]['adds']) + 1}, "
+                           f"full size {sizing_plan.formatted_amount})" if best_candidate.pair in self._scale_plans else "")
                     )
                     try:
                         if pos_type == "spot":
@@ -1018,7 +1144,7 @@ class TradingOrchestrator:
                         order_res = self.risk_manager.place_maker_limit_order(
                             pair=best_candidate.pair,
                             side=order_side,
-                            amount=sizing_plan.formatted_amount,
+                            amount=entry_amount,
                             price=best_candidate.entry_price,
                             position_side="short" if best_candidate.action == "SHORT" else None,
                             client=self.client,
@@ -1027,7 +1153,7 @@ class TradingOrchestrator:
                         if order_res.get("status") == "FULLY_FILLED" and best_candidate.pair in MARGIN_PAIRS:
                             self.risk_manager.attach_protective_stop(
                                 pair=best_candidate.pair,
-                                amount=sizing_plan.formatted_amount,
+                                amount=entry_amount,
                                 trigger_price=adj_stop_px,
                                 position_side="short" if best_candidate.action == "SHORT" else None,
                                 client=self.client,

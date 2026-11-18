@@ -145,8 +145,11 @@ class StopSyncManager:
 
         # Verify new stop is confirmed UNFILLED
         new_oid = new_order["order_id"]
-        old_oid = self.current_stop_id
+        # Only replace a stop on the same side: a stop that protects an opposite holding on this pair
+        # (spot long next to a margin short) must stay on the exchange.
+        old_oid = self.current_stop_id if getattr(self, "current_stop_side", side) == side else None
 
+        self.current_stop_side = side
         self.current_stop_id = new_oid
         self.current_stop_level = trigger_price
         self.current_stop_qty = qty
