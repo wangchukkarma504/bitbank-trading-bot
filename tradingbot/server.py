@@ -913,6 +913,7 @@ class BotController:
             "macro": macro_out,
             "circuit_breaker_sec": cb_rem,
             "daily_loss_halted": bool(getattr(orch, "_daily_loss_halted", False)),
+            "news_override": getattr(orch, "news_override", None),
             "day_start_equity_jpy": round(float(getattr(orch, "_day_start_equity_jpy", 0.0) or 0.0), 2),
             "cooldown_sec": cd_rem,
             "lessons": list(reversed(lessons)),
@@ -1285,6 +1286,7 @@ def main() -> None:
         mode=args.mode,
         allow_shorts=not args.spot_only,
         daily_state_path="daily_risk_state.json",
+        news_override_path="news_override.json",
     )
     controller = BotController(orch, auto_start=True)
     app = create_app(controller)

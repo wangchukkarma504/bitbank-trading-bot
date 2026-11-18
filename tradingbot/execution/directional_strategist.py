@@ -57,6 +57,7 @@ class DirectionalSignal:
     rsi: float = 50.0
     trend_1h: str = TrendAlignment.NEUTRAL.value
     trend_15m: str = TrendAlignment.NEUTRAL.value
+    news_driven: bool = False
 
 
 class DirectionalStrategist:
@@ -78,6 +79,13 @@ class DirectionalStrategist:
     SHORT_FADE_RSI_MIN: float = 65.0  # shorts only into an overbought 15m rally, never chasing a drop
     # Shorts also need the 1h trend down (1h EMA20 < 1h EMA50); see the gate in evaluate_pair.
 
+    # News override (set by the operator's hourly news check, never by headlines alone): a confirmed
+    # market-wide shock forces a trade in its direction with a wider stop. Position size shrinks with the
+    # wider stop (risk-based sizing), so the worst case per trade stays the same. Not backtestable.
+    NEWS_STOP_PCT: float = 0.020
+    NEWS_TP_PCT: float = 0.030
+    NEWS_CONVICTION_BOOST: float = 0.60
+
     def __init__(self, bitbank_client=None, allow_counter_trend_longs: bool = False):
         self.client = bitbank_client
         self.allow_counter_trend_longs = allow_counter_trend_longs
@@ -95,6 +103,7 @@ class DirectionalStrategist:
         btc_regime_bullish: Optional[bool] = None,
         macro_report: Optional[Any] = None,
         client=None,
+        news_bias: Optional[str] = None,
     ) -> DirectionalSignal:
         """Evaluate directional edge and construct trade signal for a single pair."""
         active_client = client or self.client
@@ -195,7 +204,8 @@ class DirectionalStrategist:
             and (trend_1h is None or last_px > trend_1h.ema20)
             and (tech_result is None or tech_result.rsi < 65.0)
         )
-        long_eligible = btc_regime_bullish or alt_breakout_ok or margin_bounce_ok
+        news = news_bias if (news_bias in ("BEARISH", "BULLISH") and pair in MARGIN_PAIRS) else None
+        long_eligible = btc_regime_bullish or alt_breakout_ok or margin_bounce_ok or news == "BULLISH"
 
         if not btc_regime_bullish:
             # Macro downtrend: award boost to Shorts; gate Longs unless breakout/bounce qualifies
@@ -308,12 +318,24 @@ class DirectionalStrategist:
                 if summary:
                     reasons.append(f"Macro Catalyst: {summary}")
 
+        if news == "BEARISH":
+            short_score = max(short_score, 0.0) + self.NEWS_CONVICTION_BOOST
+            reasons.append("NEWS OVERRIDE: confirmed bearish shock, forcing short with wide stop")
+        elif news == "BULLISH":
+            long_score = max(long_score, 0.0) + self.NEWS_CONVICTION_BOOST
+            reasons.append("NEWS OVERRIDE: confirmed bullish shock, forcing long with wide stop")
+
         short_conviction = min(1.0, max(0.0, round(short_score, 2)))
         long_conviction = min(1.0, max(0.0, round(long_score, 2))) if long_eligible else 0.0
 
         # Hard short gates (backtest): never short a 4h uptrend, and only sell an overbought rally
         short_allowed = True
-        if align_4h == TrendAlignment.BULLISH.value:
+        if news == "BEARISH":
+            pass  # the news is the thesis; the technical gates do not apply
+        elif news == "BULLISH":
+            short_allowed = False
+            reasons.append("Short gated: bullish news override active")
+        elif align_4h == TrendAlignment.BULLISH.value:
             short_allowed = False
             reasons.append("Short gated: 4h trend is BULLISH")
         elif tech_result is not None and tech_result.rsi < self.SHORT_FADE_RSI_MIN:
@@ -358,6 +380,12 @@ class DirectionalStrategist:
             # Take Profit: fixed SHORT_TP_PCT below entry (matches the orchestrator's live exit)
             tp_px = entry_px * (1.0 - self.SHORT_TP_PCT)
 
+            if news == "BEARISH":
+                # Do not wait for a pullback after a shock: rest at the top of the book, wider stop and target
+                entry_px = max(best_ask, last_px)
+                stop_px = entry_px * (1.0 + self.NEWS_STOP_PCT)
+                tp_px = entry_px * (1.0 - self.NEWS_TP_PCT)
+
         elif long_conviction >= self.MIN_CONVICTION and long_eligible:
             action = "LONG"
             position_type = "spot"
@@ -378,6 +406,11 @@ class DirectionalStrategist:
 
             # Take Profit: fixed LONG_TP_PCT above entry (matches the orchestrator's live exit)
             tp_px = entry_px * (1.0 + self.LONG_TP_PCT)
+
+            if news == "BULLISH":
+                entry_px = min(best_bid, last_px)
+                stop_px = entry_px * (1.0 - self.NEWS_STOP_PCT)
+                tp_px = entry_px * (1.0 + self.NEWS_TP_PCT)
 
         else:
             action = "NEUTRAL"
@@ -412,6 +445,7 @@ class DirectionalStrategist:
             rsi=float(tech_result.rsi) if tech_result else 50.0,
             trend_1h=align_1h,
             trend_15m=align_15m,
+            news_driven=bool(news) and action in ("SHORT", "LONG"),
         )
 
     def scan_all_pairs(

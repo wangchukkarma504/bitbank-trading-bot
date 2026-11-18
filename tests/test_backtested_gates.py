@@ -249,6 +249,113 @@ class TestStressRegressions(unittest.TestCase):
         orch.tick()
         orch.client.cancel.assert_called_once_with("eth_jpy", 555)
 
+    def _in_profit_review(self, with_resting_close: bool) -> PositionReviewResult:
+        pos = {"pair": "eth_jpy", "position_side": "short", "open_amount": "0.0900", "amount": 0.09,
+               "avg_price": 290000.0, "last_price": 284000.0, "unrealized_pnl_jpy": 540.0, "notional_jpy": 25560.0}
+        rev = _review(20500.0)
+        rev.open_positions = [pos]
+        rev.active_stops = [{"order_id": 700, "pair": "eth_jpy", "side": "buy", "type": "stop", "position_side": "short",
+                             "trigger_price": "293480", "status": "INACTIVE", "remaining_amount": "0.0900"}]
+        rev.active_orders = list(rev.active_stops)
+        if with_resting_close:
+            rev.active_orders.append({"order_id": 800, "pair": "eth_jpy", "side": "buy", "type": "limit",
+                                      "price": "284000", "remaining_amount": "0.0900", "status": "UNFILLED"})
+        return rev
+
+    def test_take_profit_never_stacks_a_second_close_order(self):
+        orch = self._orch()
+        orch.position_reviewer.review = MagicMock(return_value=self._in_profit_review(with_resting_close=False))
+        orch.tick()
+        self.assertEqual(sum(1 for c in orch.client.order.call_args_list if c.kwargs.get("type_") == "limit"), 1)
+
+        orch.client.order.reset_mock()
+        orch.position_reviewer.review = MagicMock(return_value=self._in_profit_review(with_resting_close=True))
+        orch.tick()
+        orch.client.order.assert_not_called()   # the resting close order is left to work
+        orch.client.cancel.assert_not_called()  # and is not treated as a stale entry order
+
+    def test_resting_take_profit_falls_back_to_market_after_the_wait(self):
+        orch = self._orch()
+        orch.position_reviewer.review = MagicMock(return_value=self._in_profit_review(with_resting_close=True))
+        orch.tick()
+        orch._tp_limit_since["eth_jpy"] -= orch.TP_MAKER_WAIT_SEC + 5
+        orch.tick()
+        self.assertIn("market", [c.kwargs.get("type_") for c in orch.client.order.call_args_list])
+        orch.client.cancel.assert_any_call("eth_jpy", 800)
+        orch.client.cancel.assert_any_call("eth_jpy", 700)
+
+    def test_positions_are_not_managed_on_a_failed_review(self):
+        orch = self._orch()
+        orch.position_reviewer.review = MagicMock(return_value=self._in_profit_review(with_resting_close=False))
+        orch.tick()
+        orch.client.order.reset_mock()
+        orch.position_reviewer.review = MagicMock(side_effect=RuntimeError("API timeout"))
+        orch.tick()
+        orch.client.order.assert_not_called()
+
+class TestNewsOverride(unittest.TestCase):
+    def _signal(self, news_bias, rsi=50.0, hourly_up=True):
+        hourly = _trend("1hour", TrendAlignment.NEUTRAL.value)
+        if hourly_up:
+            hourly.ema20 = hourly.ema50 * 1.003
+        mtf = {"4hour": _trend("4hour", TrendAlignment.BEARISH.value), "1hour": hourly,
+               "15min": _trend("15min", TrendAlignment.NEUTRAL.value)}
+        return DirectionalStrategist().evaluate_pair(
+            pair="eth_jpy", mtf_trend=mtf, tech_result=_tech(rsi), btc_regime_bullish=False,
+            ticker={"last": "290000", "buy": "289990", "sell": "290010"}, news_bias=news_bias,
+        )
+
+    def test_bearish_news_forces_a_short_with_the_wide_stop_past_the_technical_gates(self):
+        self.assertEqual(self._signal(None).action, "NEUTRAL")  # gated without news (RSI 50, 1h up)
+        sig = self._signal("BEARISH")
+        self.assertEqual(sig.action, "SHORT")
+        self.assertTrue(sig.news_driven)
+        self.assertAlmostEqual(sig.stop_loss_price / sig.entry_price, 1.020, places=4)
+        self.assertAlmostEqual(sig.take_profit_price / sig.entry_price, 0.970, places=4)
+
+    def test_bullish_news_forces_a_long_and_blocks_shorts(self):
+        sig = self._signal("BULLISH", rsi=70.0, hourly_up=False)  # would be a short without news
+        self.assertEqual(sig.action, "LONG")
+        self.assertAlmostEqual(sig.stop_loss_price / sig.entry_price, 0.980, places=4)
+
+    def test_wide_news_stop_does_not_raise_the_yen_risk(self):
+        rm = RiskManager(MagicMock())
+        entry = 290000.0
+        plan = rm.create_sizing_plan(equity_jpy=19000.0, pair="eth_jpy", side="sell", entry_price=entry,
+                                     stop_loss_price=entry * 1.020, take_profit_price=entry * 0.970)
+        self.assertLessEqual(plan.allocation_notional_jpy * (0.020 + rm.STOP_EXIT_COST_PCT), 19000.0 * 0.02 + 1.0)
+
+    def test_override_is_ignored_when_expired_stale_used_or_malformed(self):
+        import json
+        import os
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "news_override.json")
+        orch = TradingOrchestrator(client=MagicMock(), baseline_budget_jpy=20000.0, mode="live",
+                                   pairs=["eth_jpy"], news_override_path=path)
+        now = time.time()
+
+        def write(**kw):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(kw, f)
+
+        self.assertIsNone(orch._read_news_override(now))  # no file
+        write(bias="BEARISH", set_at=now - 60, expires_at=now + 3600, headline="Shock")
+        self.assertEqual(orch._read_news_override(now)["bias"], "BEARISH")
+        write(bias="BEARISH", set_at=now - 7200, expires_at=now - 10, headline="Old")
+        self.assertIsNone(orch._read_news_override(now))  # expired
+        write(bias="BEARISH", set_at=now - 6 * 3600, expires_at=now + 3600, headline="Stale")
+        self.assertIsNone(orch._read_news_override(now))  # older than the hard 4 h cap
+        write(bias="SIDEWAYS", set_at=now - 60, expires_at=now + 3600)
+        self.assertIsNone(orch._read_news_override(now))  # unknown bias
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertIsNone(orch._read_news_override(now))  # malformed
+
+        write(bias="BEARISH", set_at=now - 60, expires_at=now + 3600, headline="Shock")
+        self.assertIsNotNone(orch._read_news_override(now))
+        orch._mark_news_override_used()
+        self.assertIsNone(orch._read_news_override(now))  # one trade per override
+
 
 if __name__ == "__main__":
     unittest.main()

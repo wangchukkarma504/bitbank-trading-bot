@@ -827,6 +827,7 @@ async function refresh() {
     document.getElementById('subtitle').textContent = `Mode: ${d.mode} | Tick #${d.tick_count}${capTxt}` +
       (d.circuit_breaker_sec > 0 ? ` | CIRCUIT BREAKER: ${d.circuit_breaker_sec}s` : '') +
       (d.daily_loss_halted ? ' | DAILY LOSS LIMIT: no new entries until tomorrow (JST)' : '') +
+      (d.news_override ? ` | NEWS OVERRIDE ${d.news_override.bias}: ${d.news_override.headline}` : '') +
       (d.cooldown_sec > 0 ? ` | Cooldown: ${d.cooldown_sec}s` : '');
 
     const apiBadge = document.getElementById('apiBadge');

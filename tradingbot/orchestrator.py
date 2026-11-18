@@ -89,6 +89,7 @@ class TradingOrchestrator:
     CIRCUIT_BREAKER_PAUSE_SEC: float = 1800.0   # 30 min pause when circuit breaker trips
     CONSECUTIVE_LOSS_PAUSE_SEC: float = 7200.0  # 2 h pause after consecutive losses (stop-outs cluster in rallies)
     DAILY_LOSS_LIMIT_PCT: float = 0.03          # No new entries for the rest of the JST day once equity is down 3%
+    TP_MAKER_WAIT_SEC: float = 60.0             # How long a resting maker take-profit may wait before a market close
 
     def __init__(
         self,
@@ -102,6 +103,7 @@ class TradingOrchestrator:
         force_profit_close_jpy: Optional[float] = None,
         allow_counter_trend_longs: bool = False,
         daily_state_path: Optional[str] = None,
+        news_override_path: Optional[str] = None,
     ):
         self.client = client if client is not None else Bitbank()
         self.baseline_budget_jpy = baseline_budget_jpy
@@ -156,6 +158,10 @@ class TradingOrchestrator:
         self._pending_entry_signals: Dict[str, DirectionalSignal] = {}
         self._last_exit_reason: Dict[str, str] = {}
         self._orphan_stop_seen: set = set()
+        self._tp_limit_since: Dict[str, float] = {}
+        # Operator news override file: {"bias": "BEARISH"|"BULLISH", "set_at": epoch, "expires_at": epoch, "headline": str}
+        self.news_override_path: Optional[str] = news_override_path
+        self.news_override: Optional[Dict[str, Any]] = None
 
     def _load_daily_state(self) -> None:
         if not self.daily_state_path or not os.path.exists(self.daily_state_path):
@@ -168,6 +174,44 @@ class TradingOrchestrator:
             self._daily_loss_halted = bool(data.get("halted", False))
         except Exception as e:
             self.logger.warning(f"Failed to load daily risk state from {self.daily_state_path}: {e}")
+
+    NEWS_OVERRIDE_MAX_SEC: float = 4 * 3600.0  # an override older than this is ignored whatever it says
+
+    def _read_news_override(self, now_ts: float) -> Optional[Dict[str, Any]]:
+        """Return the active news override, or None when absent, malformed, expired or too old."""
+        self.news_override = None
+        if not self.news_override_path or not os.path.exists(self.news_override_path):
+            return None
+        try:
+            with open(self.news_override_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            bias = str(data.get("bias", "")).upper()
+            expires_at = float(data.get("expires_at", 0.0))
+            set_at = float(data.get("set_at", 0.0))
+        except Exception as e:
+            self.logger.warning(f"Ignoring unreadable news override: {e}")
+            return None
+        if bias not in ("BEARISH", "BULLISH") or now_ts >= expires_at or data.get("used"):
+            return None
+        if set_at <= 0 or now_ts - set_at > self.NEWS_OVERRIDE_MAX_SEC or set_at > now_ts + 300:
+            return None
+        self.news_override = {"bias": bias, "expires_at": expires_at, "set_at": set_at,
+                              "headline": str(data.get("headline", ""))[:200]}
+        return self.news_override
+
+    def _mark_news_override_used(self) -> None:
+        """One trade per override: once a news-driven position opens, the override stops forcing entries."""
+        self.news_override = None
+        if not self.news_override_path or not os.path.exists(self.news_override_path):
+            return
+        try:
+            with open(self.news_override_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["used"] = True
+            with open(self.news_override_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to mark news override as used: {e}")
 
     def _save_daily_state(self) -> None:
         if not self.daily_state_path:
@@ -185,6 +229,17 @@ class TradingOrchestrator:
                 )
         except Exception as e:
             self.logger.warning(f"Failed to save daily risk state to {self.daily_state_path}: {e}")
+
+    @staticmethod
+    def _plan_pct(sig: Optional[DirectionalSignal], field: str) -> Optional[float]:
+        """Distance of the signal's stop/target from its entry, or None when the signal carries no plan."""
+        if sig is None or sig.action not in ("SHORT", "LONG"):
+            return None
+        entry, level = float(sig.entry_price or 0.0), float(getattr(sig, field, 0.0) or 0.0)
+        if entry <= 0 or level <= 0:
+            return None
+        pct = abs(level - entry) / entry
+        return pct if 0.002 <= pct <= 0.05 else None
 
     def _update_churn_guards(self, review_res: PositionReviewResult, now_ts: float) -> None:
         """Track position opens/closes, enforce post-close cooldowns, and trip drawdown/loss circuit breakers."""
@@ -227,6 +282,9 @@ class TradingOrchestrator:
                 self._recent_entry_timestamps.append(now_ts)
                 sig = self._pending_entry_signals.pop(pair, None) or self.last_signals.get(pair)
                 macro_bias = getattr(self.last_macro_report, "catalyst_bias", "NEUTRAL") if self.last_macro_report else "NEUTRAL"
+                if sig is not None and getattr(sig, "news_driven", False):
+                    self.logger.warning(f"News-driven {pair} position opened; the news override is now used up.")
+                    self._mark_news_override_used()
                 self._active_position_meta[pair] = {
                     "entry_time": now_ts,
                     "side": pos.get("position_side", "short"),
@@ -234,6 +292,9 @@ class TradingOrchestrator:
                     "depth_ratio": getattr(sig, "depth_ratio", 1.0) if sig else 1.0,
                     "wick_classification": str(getattr(sig, "wick_classification", "NONE")) if sig else "NONE",
                     "macro_bias": macro_bias,
+                    # Exit plan the position was sized for (news trades use a wider stop and target)
+                    "stop_pct": self._plan_pct(sig, "stop_loss_price"),
+                    "tp_pct": self._plan_pct(sig, "take_profit_price"),
                     "context": {
                         "entry_rsi": float(getattr(sig, "rsi", 0.0) or 0.0) if sig else 0.0,
                         "trend_4h": str(getattr(sig, "trend_alignment", "")) if sig else "",
@@ -382,6 +443,8 @@ class TradingOrchestrator:
                     timestamp=int(time.time() * 1000),
                 )
         self.last_review = review_res
+        # Pairs that had a position on the previous clean review: if one is flat now, its stop is a leftover
+        previously_open_pairs = set(self._active_tracked_positions)
         if not review_query_failed:
             self._update_churn_guards(review_res, now_ts=self.last_tick_time)
 
@@ -406,7 +469,7 @@ class TradingOrchestrator:
                 # not a distance from the current price, which silently widened the risk after any adverse move.
                 avg_px = float(naked_pos.get("avg_price", naked_pos.get("average_price", 0.0)) or 0.0)
                 ref_px = avg_px if avg_px > 0 else last_px
-                stop_pct = self.directional_strategist.STOP_PCT
+                stop_pct = (self._active_position_meta.get(pair) or {}).get("stop_pct") or self.directional_strategist.STOP_PCT
                 planned = ref_px * (1.0 + stop_pct) if side == "short" else ref_px * (1.0 - stop_pct)
                 stop_trig = self.loss_learner.adjust_stop_price(ref_px, planned, side)
                 stop_breached = last_px > 0 and (
@@ -459,7 +522,9 @@ class TradingOrchestrator:
                     remaining_stops.append(s)
                     continue
                 orphan_ids.add(s_oid)
-                if s_oid in self._orphan_stop_seen:
+                # A position that just closed (e.g. its maker take-profit filled) leaves a certain orphan: cancel
+                # at once. Otherwise wait for a second sighting, in case a brand-new position is just appearing.
+                if s_oid in self._orphan_stop_seen or s_pair in previously_open_pairs:
                     self.logger.warning(f"Cancelling orphan stop {s_oid} on {s_pair}: no open position on this pair.")
                     try:
                         self.client.cancel(s_pair, s_oid)
@@ -508,17 +573,23 @@ class TradingOrchestrator:
         # STEP 3 & 4: Roles 4 & 5 (Wick Anatomy & Technical Depth Analysts)
         # STEP 5: Role 2 (Directional Strategist) - Multi-pair Synthesis
         # =====================================================================
+        news = self._read_news_override(self.last_tick_time)
+        news_bias = news["bias"] if news else None
         signals: Dict[str, DirectionalSignal] = {}
         for pair in self.pairs:
             try:
                 # Rate-limit compliant spacing between pair queries
                 time.sleep(self.INTER_PAIR_SLEEP_SEC)
 
+                eval_kwargs: Dict[str, Any] = {}
+                if news_bias:
+                    eval_kwargs["news_bias"] = news_bias
                 sig = self.directional_strategist.evaluate_pair(
                     pair=pair,
                     btc_regime_bullish=btc_regime_bullish,
                     macro_report=macro_report,
                     client=self.client,
+                    **eval_kwargs,
                 )
                 signals[pair] = sig
             except Exception as e:
@@ -530,7 +601,16 @@ class TradingOrchestrator:
         # STEP 6: Role 6 (Risk & Profit Execution Manager)
         # =====================================================================
         # A. Position Management & Trailing Ratchets for Existing Positions
-        for pos in review_res.open_positions:
+        # Never manage positions from stale or incomplete data: with a failed review the position list is the
+        # previous tick's, and with a partial order query we cannot see which close orders already rest. The
+        # exchange-side stop keeps protecting the position until the next clean review.
+        review_incomplete = review_query_failed or bool(getattr(review_res, "has_query_error", False))
+        managed_positions = [] if review_incomplete else review_res.open_positions
+        open_pairs_for_tp = {p.get("pair") for p in review_res.open_positions}
+        for stale_pair in [p for p in self._tp_limit_since if p not in open_pairs_for_tp]:
+            self._tp_limit_since.pop(stale_pair, None)
+        close_limit_ids = set()
+        for pos in managed_positions:
             pair = pos.get("pair")
             last_px = float(pos.get("last_price", 0.0))
             side = pos.get("position_side", "short")
@@ -550,13 +630,15 @@ class TradingOrchestrator:
             tp_hit = force_tp_hit
             is_emergency_close = False
             if not tp_hit and side == "short" and avg_px > 0:
-                target_px = avg_px * (1.0 - self.directional_strategist.SHORT_TP_PCT)
+                plan_tp = (self._active_position_meta.get(pair) or {}).get("tp_pct")
+                target_px = avg_px * (1.0 - (plan_tp or self.directional_strategist.SHORT_TP_PCT))
                 if last_px <= target_px and last_px > 0:
                     tp_hit = True
             elif not tp_hit and side == "long" and avg_px > 0:
+                plan_tp = (self._active_position_meta.get(pair) or {}).get("tp_pct")
                 target_px = avg_px * (
                     1.012 if (pair in SPOT_ONLY_PAIRS and self.allow_counter_trend_longs)
-                    else 1.0 + self.directional_strategist.LONG_TP_PCT
+                    else 1.0 + (plan_tp or self.directional_strategist.LONG_TP_PCT)
                 )
                 if last_px >= target_px and last_px > 0:
                     tp_hit = True
@@ -598,7 +680,20 @@ class TradingOrchestrator:
                     # Try post-only maker limit close on normal TPs to earn -0.02% rebate instead of paying 0.12% taker fee
                     maker_tp_filled = False
                     maker_tp_resting = False
-                    if not is_emergency_close and not force_tp_hit and last_px > 0:
+                    # A close order already resting from an earlier tick: never stack a second one on top of it
+                    # (two could fill in one fast move). Let it work for TP_MAKER_WAIT_SEC, then close at market.
+                    existing_tp = [
+                        o for o in review_res.active_orders
+                        if o.get("pair") == pair and o.get("type") == "limit" and o.get("side") == cover_side
+                    ]
+                    close_limit_ids.update(o.get("order_id") for o in existing_tp)
+                    if existing_tp and not is_emergency_close and not force_tp_hit:
+                        first_seen = self._tp_limit_since.setdefault(pair, self.last_tick_time)
+                        if self.last_tick_time - first_seen <= self.TP_MAKER_WAIT_SEC:
+                            maker_tp_resting = True
+                        else:
+                            self.logger.info(f"Maker take-profit on {pair} did not fill in {self.TP_MAKER_WAIT_SEC:.0f}s; closing at market.")
+                    elif not is_emergency_close and not force_tp_hit and last_px > 0:
                         cfg_p = MARGIN_PAIRS.get(pair) or SPOT_ONLY_PAIRS.get(pair)
                         pd_p = cfg_p.price_digits if cfg_p else 1
                         tp_px_str = f"{last_px:.{pd_p}f}" if pd_p > 0 else str(int(round(last_px)))
@@ -611,6 +706,7 @@ class TradingOrchestrator:
                                 maker_tp_filled = True
                             elif tp_res.get("order_id") is not None:
                                 maker_tp_resting = True
+                                self._tp_limit_since[pair] = self.last_tick_time
                         except Exception:
                             pass
 
@@ -640,15 +736,33 @@ class TradingOrchestrator:
                                     self.client.order(pair, side=cover_side, amount=amt_str, type_="market")
                             except Exception as e:
                                 self.logger.error(f"Take-profit close failed on {pair}: {e}")
+                        # If a cancel above failed, the stop is now an orphan: mark it so the cleanup at the
+                        # start of the next tick removes it at first sight instead of waiting a second tick.
+                        if mgr.current_stop_id is not None:
+                            self._orphan_stop_seen.add(mgr.current_stop_id)
+                        self._orphan_stop_seen.update(
+                            o.get("order_id") for o in review_res.active_stops if o.get("pair") == pair
+                        )
                         mgr.current_stop_id = None
                         mgr.current_stop_level = None
                         mgr.current_stop_qty = None
                         self.position_reviewer.spot_entry_prices.pop(pair, None)
+                        self._tp_limit_since.pop(pair, None)
                 else:
                     self.logger.info(f"[DRY-RUN] Take-Profit execution simulated for {pair}")
 
             elif not self.dry_run:
-                # Apply trailing ratchets (break-even at +0.3%, profit-lock at +1.0%)
+                # Price left the take-profit zone: pull any resting close order and go back to the stop
+                leave_side = "buy" if side == "short" else "sell"
+                for o in review_res.active_orders:
+                    if o.get("pair") == pair and o.get("type") == "limit" and o.get("side") == leave_side:
+                        close_limit_ids.add(o.get("order_id"))
+                        try:
+                            self.client.cancel(pair, o.get("order_id"))
+                        except Exception as e:
+                            self.logger.warning(f"Failed to cancel resting take-profit {o.get('order_id')} on {pair}: {e}")
+                self._tp_limit_since.pop(pair, None)
+                # Apply trailing ratchets (only the >= +1.6% trailing lock is active by default)
                 try:
                     self.risk_manager.evaluate_and_apply_ratchets(
                         pair=pair,
@@ -661,7 +775,11 @@ class TradingOrchestrator:
                     self.logger.warning(f"Trailing ratchet check failed on {pair}: {e}")
 
         # B. Stale Resting Limit Order Management & Entry Evaluation
-        active_limits = [o for o in review_res.active_orders if o.get("type") == "limit"]
+        # Close orders handled above are not entry orders: keep them out of the stale-entry logic
+        active_limits = [
+            o for o in review_res.active_orders
+            if o.get("type") == "limit" and o.get("order_id") not in close_limit_ids
+        ]
         cancelled_any_limit = False
         if active_limits and not self.dry_run:
             now_ms = int(time.time() * 1000)
