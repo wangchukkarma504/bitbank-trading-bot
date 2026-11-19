@@ -25,7 +25,7 @@ PREDICT_HTML = r"""<!doctype html>
   button, select, input { font-family: inherit; }
 
   /* top bar */
-  .topbar { position: sticky; top: 0; z-index: 50; background: rgba(11,14,20,0.86); backdrop-filter: blur(14px);
+  .topbar { position: relative; z-index: 50; background: rgba(11,14,20,0.86); backdrop-filter: blur(14px);
             -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border);
             padding: max(10px, calc(env(safe-area-inset-top) + 6px)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); }
   .topbar-in { max-width: 1500px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
@@ -149,12 +149,12 @@ PREDICT_HTML = r"""<!doctype html>
       <span class="seg" id="aheads"><span class="lbl">Predict</span>
         <button data-v="1h">1 hour</button><button data-v="4h">4 hours</button><button data-v="1d">1 day</button>
       </span>
-      <label class="chip"><input type="checkbox" id="showPast"> Past</label>
+      <label class="chip"><input type="checkbox" id="showPast" checked> Cone</label>
       <span class="grow"></span>
       <button class="fsbtn" id="fsBtn">⛶ Full screen</button>
     </div>
     <div id="chartBox"><svg id="chart" role="img" aria-label="Price chart with predicted candles"></svg></div>
-    <div class="hint">Drag to move · pinch or scroll to zoom · double-tap to reset · tap a candle for its prices</div>
+    <div class="hint">Top: real price · Bottom: the model's candles (each past one predicted a candle ahead, then the future) · drag, pinch, double-tap to reset, tap for prices</div>
   </div>
 
   <div class="card">
@@ -253,7 +253,7 @@ function layout() {
   card.classList.toggle('rot', fs && !document.fullscreenElement && window.innerHeight > window.innerWidth);
   if (fs) { const cs = getComputedStyle(card);
     box.style.height = Math.max(200, card.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - card.querySelector('.bar').offsetHeight - 8) + 'px'; }
-  else box.style.height = Math.round(window.innerWidth < 700 ? Math.max(430, window.innerHeight * 0.62) : Math.min(680, Math.max(520, window.innerHeight * 0.68))) + 'px';
+  else box.style.height = Math.round(window.innerWidth < 700 ? Math.max(560, window.innerHeight * 0.8) : Math.min(860, Math.max(640, window.innerHeight * 0.82))) + 'px';
   draw();
 }
 $('fsBtn').onclick = () => setFs(!$('chartCard').classList.contains('fs'));
@@ -294,86 +294,100 @@ function ensureView(W) {
 let geo = null;      // drawing geometry, for pointer handling
 function draw() {
   const d = S.data, svg = $('chart');
-  const W = Math.max(300, svg.clientWidth), H = Math.max(240, svg.clientHeight);
+  const W = Math.max(300, svg.clientWidth), H = Math.max(300, svg.clientHeight);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   if (!d || d.error) { svg.innerHTML = `<rect width="${W}" height="${H}" fill="${C.bg}"/><text x="20" y="40" fill="${C.axis}" font-size="13">${d ? d.error : 'Loading…'}</text>`; return; }
   const it = ensureView(W), step = it.step, t0 = it.t0;
   const mobile = W < 640, fs = mobile ? 9.5 : 10.5;
-  const all = d.candles, closes = all.map(c => c.c), e20 = ema(closes, 20), e50 = ema(closes, 50), rs = rsi(closes, 14);
+  const all = d.candles, closes = all.map(c => c.c), e20 = ema(closes, 20), e50 = ema(closes, 50);
   const idx = (t) => Math.round((t - t0) / step);
   const lo = S.right - S.count, hi = S.right;
   const vis = (i) => i >= Math.floor(lo) - 1 && i <= Math.ceil(hi) + 1;
-  const act = all.map((c, i) => ({ c, i: idx(c.t), e20: e20[i], e50: e50[i], r: rs[i] })).filter(o => vis(o.i));
+  const act = all.map((c, i) => ({ c, i: idx(c.t), e20: e20[i], e50: e50[i] })).filter(o => vis(o.i));
   const fut = d.forecast.map(c => ({ c, i: idx(c.t) })).filter(o => vis(o.i));
-  const past = $('showPast').checked ? d.past.map(c => ({ c, i: idx(c.t) })).filter(o => vis(o.i)) : [];
+  const past = d.past.map(c => ({ c, i: idx(c.t) })).filter(o => vis(o.i));
   const pos = (S.status && S.status.open_positions || []).find(p => p.pair === S.pair) || null;
+  const showCone = $('showPast').checked;
 
-  const padL = 4, padR = mobile ? 70 : 84, padT = mobile ? 40 : 34, padB = 22;
-  const rsiH = H < 380 ? 0 : (mobile ? 54 : 68), gap = rsiH ? 10 : 0;
-  const priceH = H - padT - padB - rsiH - gap, volH = priceH * 0.14, rsiTop = padT + priceH + gap;
+  // two panels on one time axis: real price on top, the model's candles below
+  const padL = 4, padR = mobile ? 70 : 84, padT = mobile ? 40 : 34, padB = 22, gap = 30;
   const plotW = W - padL - padR, sp = plotW / S.count, cw = Math.max(1.5, Math.min(14, sp * 0.68));
+  const avail = H - padT - padB - gap, topH = Math.round(avail * 0.56), botH = avail - topH;
+  const topY = padT, botY = padT + topH + gap, volH = topH * 0.14;
   const x = (i) => padL + (i - lo + 0.5) * sp;
   geo = { padL, padR, padT, padB, W, H, sp, lo, t0, step };
 
-  let pl = Infinity, ph = -Infinity;
-  const take = (v) => { if (v > 0) { pl = Math.min(pl, v); ph = Math.max(ph, v); } };
-  act.forEach(o => { take(o.c.l); take(o.c.h); });
-  fut.forEach(o => { take(o.c.l); take(o.c.h); take(o.c.band_lo); take(o.c.band_hi); });
-  past.forEach(o => { take(o.c.l); take(o.c.h); });
-  if (pl === Infinity) { pl = d.anchor_close * 0.99; ph = d.anchor_close * 1.01; }
+  const range = (vals) => { let a = Infinity, b = -Infinity; vals.forEach(v => { if (v > 0) { a = Math.min(a, v); b = Math.max(b, v); } });
+    if (a === Infinity) { a = d.anchor_close * 0.99; b = d.anchor_close * 1.01; }
+    const s = Math.max(b - a, b * 0.0005); return [a - s * 0.07, b + s * 0.07]; };
   const entry = pos ? Number(pos.avg_price || 0) : 0, stop = pos ? Number(pos.stop_trigger_price || 0) : 0;
-  [entry, stop].forEach(v => { if (v > 0 && v > pl * 0.97 && v < ph * 1.03) take(v); });
-  const span = Math.max(1e-9, ph - pl); pl -= span * 0.06; ph += span * 0.06;
-  const y = (v) => padT + (1 - (v - pl) / (ph - pl)) * priceH, yR = (v) => rsiTop + (1 - v / 100) * rsiH;
+  const topVals = [];
+  act.forEach(o => topVals.push(o.c.l, o.c.h));
+  if (showCone) fut.forEach(o => topVals.push(o.c.band_lo, o.c.band_hi));
+  const [pl0, ph0] = range(topVals); let pl = pl0, ph = ph0;
+  [entry, stop].forEach(v => { if (v > 0 && v > pl * 0.97 && v < ph * 1.03) { pl = Math.min(pl, v); ph = Math.max(ph, v); } });
+  const botVals = []; past.forEach(o => botVals.push(o.c.l, o.c.h)); fut.forEach(o => botVals.push(o.c.l, o.c.h));
+  const [ql, qh] = range(botVals);
+  const y = (v) => topY + (1 - (v - pl) / (ph - pl)) * topH, yb = (v) => botY + (1 - (v - ql) / (qh - ql)) * botH;
 
-  let g = `<rect width="${W}" height="${H}" fill="${C.bg}"/><defs><clipPath id="cp"><rect x="${padL}" y="0" width="${plotW}" height="${H}"/></clipPath></defs>`;
-  for (let k = 0; k <= 5; k++) { const v = pl + (ph - pl) * k / 5, yy = y(v);
-    g += `<line x1="${padL}" x2="${W - padR}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${C.grid}"/><text x="${W - padR + 6}" y="${(yy + 3.5).toFixed(1)}" fill="${C.axis}" font-size="${fs}">${fmt(v)}</text>`; }
-  let body = '';
-  // time grid: about one label per 80 px, on round slot numbers
+  let g = `<rect width="${W}" height="${H}" fill="${C.bg}"/><defs><clipPath id="cpT"><rect x="${padL}" y="${topY}" width="${plotW}" height="${topH}"/></clipPath>` +
+          `<clipPath id="cpB"><rect x="${padL}" y="${botY}" width="${plotW}" height="${botH}"/></clipPath></defs>`;
+  g += `<rect x="${padL}" y="${botY}" width="${plotW}" height="${botH}" fill="rgba(96,165,250,0.035)"/>`;
+  const yGrid = (yf, a, b, y0, h) => { for (let k = 0; k <= 4; k++) { const v = a + (b - a) * k / 4, yy = yf(v);
+    g += `<line x1="${padL}" x2="${W - padR}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${C.grid}"/><text x="${W - padR + 6}" y="${(yy + 3.5).toFixed(1)}" fill="${C.axis}" font-size="${fs}">${fmt(v)}</text>`; } };
+  yGrid(y, pl, ph); yGrid(yb, ql, qh);
   const every = Math.max(1, Math.ceil(80 / sp));
   for (let i = Math.ceil(lo / every) * every; i <= hi; i += every) { const xx = x(i);
-    body += `<line x1="${xx.toFixed(1)}" x2="${xx.toFixed(1)}" y1="${padT}" y2="${padT + priceH}" stroke="${C.grid}"/>`;
-    g += `<text x="${xx.toFixed(1)}" y="${H - 7}" fill="${C.axis}" font-size="${fs}" text-anchor="middle">${jst(t0 + i * step, step >= 36e5 * 4 || (t0 + i * step) % 864e5 === 0)}</text>`; }
-  // the future: shaded area and the 80% cone
+    g += `<line x1="${xx.toFixed(1)}" x2="${xx.toFixed(1)}" y1="${topY}" y2="${botY + botH}" stroke="${C.grid}"/>` +
+         `<text x="${xx.toFixed(1)}" y="${H - 7}" fill="${C.axis}" font-size="${fs}" text-anchor="middle">${jst(t0 + i * step, step >= 36e5 * 4 || (t0 + i * step) % 864e5 === 0)}</text>`; }
   const ai = idx(d.anchor_t), nowX = x(ai + 1) + sp / 2;
-  body += `<rect x="${nowX.toFixed(1)}" y="${padT}" width="${Math.max(0, W - padR - nowX).toFixed(1)}" height="${priceH}" fill="rgba(96,165,250,0.05)"/>`;
-  const cone = [[x(ai + 1), y(d.forecast.length ? d.forecast[0].o : d.anchor_close)]].concat(d.forecast.map(c => [x(idx(c.t)), y(c.band_hi)]))
-    .concat(d.forecast.slice().reverse().map(c => [x(idx(c.t)), y(c.band_lo)]));
-  body += `<polygon points="${cone.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="${C.cone}" stroke="rgba(96,165,250,0.4)" stroke-dasharray="3 3"/>`;
-  body += `<line x1="${nowX.toFixed(1)}" x2="${nowX.toFixed(1)}" y1="${padT}" y2="${padT + priceH}" stroke="${C.pred}" stroke-dasharray="4 4" opacity="0.8"/>`;
-  if (nowX < W - padR - 40) body += `<text x="${(nowX + 5).toFixed(1)}" y="${padT + 13}" fill="${C.pred}" font-size="${fs}" font-weight="800">PREDICTION ▸</text>`;
+  [[topY, topH], [botY, botH]].forEach(([y0, h]) => {
+    g += `<rect x="${nowX.toFixed(1)}" y="${y0}" width="${Math.max(0, W - padR - nowX).toFixed(1)}" height="${h}" fill="rgba(96,165,250,0.06)"/>`; });
+  g += `<line x1="${nowX.toFixed(1)}" x2="${nowX.toFixed(1)}" y1="${topY}" y2="${botY + botH}" stroke="${C.pred}" stroke-dasharray="4 4" opacity="0.7"/>`;
+
+  const candle = (c, xx, yf, style) => { const upc = c.c >= c.o, col = upc ? C.up : C.down, yo = yf(c.o), yc = yf(c.c);
+    const top = Math.min(yo, yc), h = Math.max(1.2, Math.abs(yc - yo)), dash = style === 'future' ? ' stroke-dasharray="3 2"' : '';
+    const fill = style === 'future' ? (upc ? C.upF : C.downF) : col;
+    return `<line x1="${xx.toFixed(1)}" x2="${xx.toFixed(1)}" y1="${yf(c.h).toFixed(1)}" y2="${yf(c.l).toFixed(1)}" stroke="${col}"/>` +
+           `<rect x="${(xx - cw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${cw.toFixed(1)}" height="${h.toFixed(1)}" fill="${fill}"${style === 'future' ? ` stroke="${col}" stroke-width="1.1"${dash}` : ''}/>`; };
+
+  // top panel: real candles, volume, EMAs, the 80% cone, position lines
+  let top = '';
   const maxV = Math.max(1e-9, ...act.map(o => o.c.v));
-  const candle = (c, xx, faded) => { const upc = c.c >= c.o, col = upc ? C.up : C.down, yo = y(c.o), yc = y(c.c);
-    const top = Math.min(yo, yc), h = Math.max(1, Math.abs(yc - yo));
-    return `<line x1="${xx.toFixed(1)}" x2="${xx.toFixed(1)}" y1="${y(c.h).toFixed(1)}" y2="${y(c.l).toFixed(1)}" stroke="${col}" ${faded ? 'opacity="0.6"' : ''}/>` +
-           `<rect x="${(xx - cw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${cw.toFixed(1)}" height="${h.toFixed(1)}" fill="${faded ? (upc ? C.upF : C.downF) : col}" ${faded ? `stroke="${col}" stroke-width="1"` : ''}/>`; };
   act.forEach(o => { const xx = x(o.i), col = o.c.c >= o.c.o ? C.up : C.down, vh = o.c.v / maxV * volH;
-    body += `<rect x="${(xx - cw / 2).toFixed(1)}" y="${(padT + priceH - vh).toFixed(1)}" width="${cw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${col}" opacity="0.22"/>` + candle(o.c, xx, false); });
+    top += `<rect x="${(xx - cw / 2).toFixed(1)}" y="${(topY + topH - vh).toFixed(1)}" width="${cw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${col}" opacity="0.22"/>` + candle(o.c, xx, y, 'real'); });
   const line = (arr, key, yf) => { let p = '', pen = false; arr.forEach(o => { const v = o[key]; if (v == null) { pen = false; return; } p += (pen ? 'L' : 'M') + x(o.i).toFixed(1) + ' ' + yf(v).toFixed(1) + ' '; pen = true; }); return p; };
-  body += `<path d="${line(act, 'e50', y)}" fill="none" stroke="${C.ema50}" stroke-width="1.3"/><path d="${line(act, 'e20', y)}" fill="none" stroke="${C.ema20}" stroke-width="1.3"/>`;
-  past.forEach(o => { const xx = x(o.i), col = o.c.hit ? C.hit : C.miss;
-    body += `<rect x="${(xx - cw / 2 - 2).toFixed(1)}" y="${Math.min(y(o.c.o), y(o.c.c)).toFixed(1)}" width="${(cw + 4).toFixed(1)}" height="${Math.max(1.5, Math.abs(y(o.c.c) - y(o.c.o))).toFixed(1)}" fill="none" stroke="${col}" stroke-dasharray="2 2"/>`; });
-  fut.forEach(o => body += candle(o.c, x(o.i), true));
-  // levels
-  const tags = [], last = all[all.length - 1], lastF = d.forecast[d.forecast.length - 1];
+  top += `<path d="${line(act, 'e50', y)}" fill="none" stroke="${C.ema50}" stroke-width="1.3"/><path d="${line(act, 'e20', y)}" fill="none" stroke="${C.ema20}" stroke-width="1.3"/>`;
+  if (showCone && d.forecast.length) {
+    const startY = y(d.forecast[0].o);
+    const pts = [[x(ai + 1), startY]].concat(d.forecast.map(c => [x(idx(c.t)), y(c.band_hi)])).concat(d.forecast.slice().reverse().map(c => [x(idx(c.t)), y(c.band_lo)]));
+    top += `<polygon points="${pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="${C.cone}" stroke="rgba(96,165,250,0.45)" stroke-dasharray="3 3"/>`;
+  }
+  const tags = [], last = all[all.length - 1];
   const level = (v, col, dash, label) => { if (!(v > 0) || v < pl || v > ph) return;
-    body += `<line x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="${col}" stroke-width="1.2" ${dash ? `stroke-dasharray="${dash}"` : ''}/>`;
-    if (label) body += `<text x="${padL + 6}" y="${(y(v) - 5).toFixed(1)}" fill="${col}" font-size="${fs}" font-weight="800">${label}</text>`;
+    top += `<line x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="${col}" stroke-width="1.2" ${dash ? `stroke-dasharray="${dash}"` : ''}/>`;
+    if (label) top += `<text x="${padL + 6}" y="${(y(v) - 5).toFixed(1)}" fill="${col}" font-size="${fs}" font-weight="800">${label}</text>`;
     tags.push({ y: y(v), col, text: fmt(v) }); };
   level(last.c, last.c >= last.o ? C.up : C.down, '2 3');
   if (pos) { level(entry, C.entry, '', `${pos.position_side.toUpperCase()} ${pos.open_amount} @ ${fmt(entry)}`); level(stop, C.stop, '5 4', 'STOP'); }
-  if (lastF && lastF.c >= pl && lastF.c <= ph) tags.push({ y: y(lastF.c), col: '#2563eb', text: fmt(lastF.c) });
-  g += `<g clip-path="url(#cp)">${body}</g>`;
-  tags.sort((a, b) => a.y - b.y);
-  for (let k = 1; k < tags.length; k++) if (tags[k].y - tags[k - 1].y < 17) tags[k].y = tags[k - 1].y + 17;
-  tags.forEach(t => g += `<rect x="${W - padR + 1}" y="${(t.y - 8.5).toFixed(1)}" width="${padR - 3}" height="17" rx="3" fill="${t.col}"/><text x="${W - padR + 6}" y="${(t.y + 3.6).toFixed(1)}" fill="#fff" font-size="${fs}" font-weight="700">${t.text}</text>`);
-  if (rsiH) {
-    g += `<g clip-path="url(#cp)"><rect x="${padL}" y="${rsiTop}" width="${plotW}" height="${rsiH}" fill="rgba(255,255,255,0.02)"/><path d="${line(act, 'r', yR)}" fill="none" stroke="${C.rsi}" stroke-width="1.2"/></g>`;
-    [30, 70].forEach(v => g += `<line x1="${padL}" x2="${W - padR}" y1="${yR(v).toFixed(1)}" y2="${yR(v).toFixed(1)}" stroke="${C.grid}" stroke-dasharray="3 3"/><text x="${W - padR + 6}" y="${(yR(v) + 3.5).toFixed(1)}" fill="${C.axis}" font-size="${fs}">${v}</text>`);
-    g += `<text x="${padL + 6}" y="${rsiTop + 11}" fill="${C.rsi}" font-size="${fs}" font-weight="700">RSI 14</text>`;
-  }
-  g += `<line id="xh" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="rgba(255,255,255,0.3)" stroke-dasharray="3 3" visibility="hidden"/>`;
+  g += `<g clip-path="url(#cpT)">${top}</g>`;
+
+  // bottom panel: the model's candles (each past candle predicted one candle ahead, then the future)
+  let bot = '';
+  past.forEach(o => bot += candle(o.c, x(o.i), yb, 'real'));
+  fut.forEach(o => bot += candle(o.c, x(o.i), yb, 'future'));
+  past.forEach(o => bot += `<circle cx="${x(o.i).toFixed(1)}" cy="${(botY + botH - 5).toFixed(1)}" r="${Math.max(1.4, Math.min(2.6, sp * 0.18)).toFixed(1)}" fill="${o.c.hit ? C.hit : C.miss}"/>`);
+  g += `<g clip-path="url(#cpB)">${bot}</g>`;
+  const lastF = d.forecast[d.forecast.length - 1];
+  const btags = lastF ? [{ y: yb(lastF.c), col: '#2563eb', text: fmt(lastF.c) }] : [];
+
+  // panel titles and axis tags
+  g += `<text x="${padL + 6}" y="${topY + 13}" fill="${C.text}" font-size="${fs}" font-weight="800" opacity="0.85">REAL PRICE</text>`;
+  g += `<text x="${padL + 6}" y="${botY - 8}" fill="${C.pred}" font-size="${fs}" font-weight="800">MODEL CANDLES <tspan fill="${C.axis}" font-weight="600">· own scale ${pct(qh / ql - 1)} tall · next ${AH[d.ahead]} after the line</tspan></text>`;
+  const drawTags = (arr) => { arr.sort((a, b) => a.y - b.y); for (let k = 1; k < arr.length; k++) if (arr[k].y - arr[k - 1].y < 17) arr[k].y = arr[k - 1].y + 17;
+    arr.forEach(t => g += `<rect x="${W - padR + 1}" y="${(t.y - 8.5).toFixed(1)}" width="${padR - 3}" height="17" rx="3" fill="${t.col}"/><text x="${W - padR + 6}" y="${(t.y + 3.6).toFixed(1)}" fill="#fff" font-size="${fs}" font-weight="700">${t.text}</text>`); };
+  drawTags(tags); drawTags(btags);
+  g += `<line id="xh" x1="0" x2="0" y1="${topY}" y2="${botY + botH}" stroke="rgba(255,255,255,0.3)" stroke-dasharray="3 3" visibility="hidden"/>`;
   g += `<text id="ro1" x="${padL + 6}" y="${mobile ? 14 : 18}" fill="${C.text}" font-size="${mobile ? 10.5 : 12}" font-weight="600"></text>`;
   g += `<text id="ro2" x="${padL + 6}" y="${mobile ? 29 : 18}" fill="${C.axis}" font-size="${mobile ? 10 : 11.5}" ${mobile ? '' : `text-anchor="end" transform="translate(${W - padR - padL - 12},0)"`}></text>`;
   svg.innerHTML = g;
@@ -382,18 +396,19 @@ function draw() {
 
 function readout(i) {
   const d = S.data, ro1 = $('ro1'), ro2 = $('ro2'), xh = $('xh'); if (!d || d.error || !ro1) return;
-  const step = d.step_ms, t0 = d.candles[0].t, lastF = d.forecast[d.forecast.length - 1];
-  const name = `${S.pair.replace('_jpy', '').toUpperCase()}/JPY ${TF[d.tf]}`;
+  const step = d.step_ms, t0 = d.candles[0].t, lastF = d.forecast[d.forecast.length - 1], now = d.candles[d.candles.length - 1].c;
+  const ohlc = (c) => { const col = c.c >= c.o ? C.up : C.down;
+    return `O <tspan fill="${col}">${fmt(c.o)}</tspan> H <tspan fill="${col}">${fmt(c.h)}</tspan> L <tspan fill="${col}">${fmt(c.l)}</tspan> C <tspan fill="${col}">${fmt(c.c)}</tspan>`; };
   if (i == null || !geo) {
-    ro1.innerHTML = `${name} · <tspan fill="${C.ema20}">EMA20</tspan> <tspan fill="${C.ema50}">EMA50</tspan> · <tspan fill="${C.pred}">next ${AH[d.ahead]}: ${d.forecast.length} candles</tspan>`;
-    ro2.textContent = lastF ? `now ${fmt(d.candles[d.candles.length - 1].c)} → ${fmt(lastF.c)} (${pct(lastF.c / d.candles[d.candles.length - 1].c - 1)})` : '';
+    ro1.innerHTML = `${S.pair.replace('_jpy', '').toUpperCase()}/JPY ${TF[d.tf]} · <tspan fill="${C.ema20}">EMA20</tspan> <tspan fill="${C.ema50}">EMA50</tspan> · tap a candle to compare`;
+    ro2.innerHTML = lastF ? `<tspan fill="${C.pred}">now ${fmt(now)} → in ${AH[d.ahead]} ${fmt(lastF.c)} (${pct(lastF.c / now - 1)})</tspan>` : '';
     xh.setAttribute('visibility', 'hidden'); return; }
   const t = t0 + i * step, xx = geo.padL + (i - geo.lo + 0.5) * geo.sp;
   xh.setAttribute('x1', xx); xh.setAttribute('x2', xx); xh.setAttribute('visibility', 'visible');
   const a = d.candles.find(c => c.t === t), f = d.forecast.find(c => c.t === t), p = d.past.find(c => c.t === t);
-  const c = a || f, col = c && c.c >= c.o ? C.up : C.down;
-  ro1.innerHTML = `${jst(t, true)} ${f && !a ? '<tspan fill="' + C.pred + '">predicted</tspan> ' : ''}` + (c ? `O <tspan fill="${col}">${fmt(c.o)}</tspan> H <tspan fill="${col}">${fmt(c.h)}</tspan> L <tspan fill="${col}">${fmt(c.l)}</tspan> C <tspan fill="${col}">${fmt(c.c)}</tspan>` : '');
-  ro2.innerHTML = f ? `<tspan fill="${C.pred}">80% range ${fmt(f.band_lo)} – ${fmt(f.band_hi)}</tspan>` : p ? `<tspan fill="${p.hit ? C.hit : C.miss}">predicted beforehand ${fmt(p.c)} · ${p.hit ? 'right' : 'wrong'} direction</tspan>` : '';
+  ro1.innerHTML = `${jst(t, true)} · real ` + (a ? ohlc(a) : '<tspan fill="#8b93a7">not yet</tspan>');
+  ro2.innerHTML = f ? `<tspan fill="${C.pred}">model</tspan> ${ohlc(f)} <tspan fill="${C.pred}">· 80% ${fmt(f.band_lo)}–${fmt(f.band_hi)}</tspan>`
+    : p ? `<tspan fill="${C.pred}">model</tspan> ${ohlc(p)} <tspan fill="${p.hit ? C.hit : C.miss}">· ${p.hit ? 'right' : 'wrong'} direction</tspan>` : '';
 }
 
 // pointer: drag to pan, pinch / wheel to zoom, tap for prices, double-tap to reset
@@ -469,7 +484,7 @@ function kpis() {
     k('80% range', `${fmt(last.band_lo)} – ${fmt(last.band_hi)}`, `On test data the price ended inside this range ${m.coverage != null ? (m.coverage * 100).toFixed(0) : 80}% of the time`) +
     k(`Direction right (test, ${AH[d.ahead]})`, m.hit != null ? `${(m.hit * 100).toFixed(1)}%` : '–',
       `${m.test_samples.toLocaleString()} predictions since ${m.test_from} it never saw. Always guessing the more common direction: ${m.majority != null ? (m.majority * 100).toFixed(1) + '%' : '–'}.`) +
-    k('Last 40 candles', d.recent_hit_rate == null ? '–' : `${(d.recent_hit_rate * 100).toFixed(0)}%`, 'One-candle-ahead direction right (tick "past" to see them on the chart: teal right, amber wrong)');
+    k('Past predictions on the chart', d.recent_hit_rate == null ? '–' : `${(d.recent_hit_rate * 100).toFixed(0)}%`, `Direction right on the ${d.past.length} candles the lower chart predicted one candle ahead (dots: teal right, amber wrong)`);
   $('how').innerHTML = `How it works: a ridge regression trained on ${m.train_samples.toLocaleString()} past ${TF[d.tf]} candles of all five coins reads 12 patterns of the candles so far ` +
     `(returns over 1–32 candles, distance from the 20- and 50-candle averages, volatility, RSI, where the candle closed in its range, volume) and predicts the close of each coming candle. ` +
     `Wicks use the typical wick size for the current volatility. The shaded cone is where the price ended 80% of the time on test data.`;

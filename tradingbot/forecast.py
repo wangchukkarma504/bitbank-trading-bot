@@ -86,7 +86,7 @@ def options() -> Dict[str, List[str]]:
 
 
 def forecast(candles: List[Dict[str, Any]], tf: str, ahead: str, now_ms: int, model: Optional[Dict[str, Any]] = None,
-             history: int = 40) -> Dict[str, Any]:
+             history: int = 600) -> Dict[str, Any]:
     """Predicted candles for `ahead` after the candle that is still forming, and the one-candle-ahead
     predictions the model made for the last `history` closed candles."""
     tf = tf if tf in TIMEFRAMES else "15min"
@@ -122,7 +122,8 @@ def forecast(candles: List[Dict[str, Any]], tf: str, ahead: str, now_ms: int, mo
     for i in range(max(0, last - history), last):
         if feats[i] is None:
             continue
-        y1 = _predict_steps(m, feats[i])[0]
+        z = [(x - mu) / sd for x, mu, sd in zip(feats[i], m["mean"], m["std"])]
+        y1 = m["intercept"][0] + sum(w * x for w, x in zip(m["coef"][0], z))      # first step only: cheap
         ci, ai = bars[i][4], feats[i][8]
         pc = ci * math.exp(ai * y1)
         p = {"t": bars[i + 1][0], "o": ci, "c": pc, "h": max(ci, pc) * math.exp(ai * m["wick_up"]),
