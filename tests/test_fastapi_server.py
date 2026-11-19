@@ -75,6 +75,52 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertEqual(len(body["closed_positions"]), 1)
         mock_bb.order.assert_called_once()
 
+    def _controller_on_the_simulated_exchange(self):
+        from tests.test_engine import Rig
+        rig = Rig()
+        controller = BotController(rig.engine, history_path="", config_path="", env_path="", tax_profile_path="",
+                                   trade_log_path="", auto_start=True)
+        controller.EMERGENCY_RECHECK_SEC = 0.0
+        return rig, controller
+
+    def test_emergency_stop_during_an_entry_leaves_nothing_behind(self):
+        rig, controller = self._controller_on_the_simulated_exchange()
+        rig.breakout()
+        rig.tick()                                            # the maker buy is resting
+        self.assertEqual(len(rig.live(side="buy")), 1)
+        report = controller.emergency_stop_all()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(rig.live(), [])
+        self.assertEqual(rig.engine.entries, {})
+        rig.tick(601.0)                                       # the engine keeps ticking: it must not finish the buy
+        rig.tick()
+        self.assertEqual(rig.long(), 0.0)
+        self.assertEqual(rig.live(), [])
+
+    def test_closing_a_coin_during_its_entry_does_not_buy_it_back(self):
+        rig, controller = self._controller_on_the_simulated_exchange()
+        rig.breakout()
+        rig.tick()
+        order = rig.live(side="buy", type="limit")[0]
+        half = float(order["start_amount"]) / 2               # half of the maker buy has filled
+        rig.mock._update_margin_position("eth_jpy", "long", delta_amount=half, fill_price=335000.0)
+        order["executed_amount"], order["remaining_amount"] = f"{half:.4f}", f"{half:.4f}"
+        rig.tick()
+        self.assertGreater(rig.long(), 0.0)
+        controller.close_position("eth_jpy", "long")
+        self.assertEqual(rig.long(), 0.0)
+        rig.tick(601.0)                                       # still running: no market buy of the other half
+        rig.tick()
+        rig.tick()
+        self.assertEqual(rig.long(), 0.0)
+        self.assertEqual(rig.live(), [])
+
+    def test_pause_switches_new_entries_off_at_once(self):
+        rig, controller = self._controller_on_the_simulated_exchange()
+        self.assertTrue(controller.running)
+        controller.pause()
+        self.assertFalse(rig.engine.entries_enabled)
+
     def test_pause_and_emergency_stop_survive_a_restart(self):
         path = os.path.join(tempfile.mkdtemp(), "bot_config.json")
         client, controller, _ = self._make_client(config_path=path, auto_start=True)
@@ -107,6 +153,14 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertAlmostEqual(five.engine.params.max_notional * 5, 1.95)      # never more than the exchange lends
         self.assertEqual(controller.engine.settings.equity_floor_jpy, 15000.0)
         self.assertAlmostEqual(controller.engine.settings.baseline_jpy, 20000.66)
+
+    def test_unreadable_settings_file_starts_paused(self):
+        path = os.path.join(tempfile.mkdtemp(), "bot_config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"baseline_jpy": 20000.66, "emergency_stopped": tr')     # cut off half-way through a write
+        _, controller, _ = self._make_client(config_path=path, auto_start=True)
+        self.assertFalse(controller.running)
+        self.assertFalse(controller.engine.entries_enabled)
 
     def test_update_config_capital_and_api_key_masked(self):
         client, controller, _ = self._make_client(mode="dry-run")

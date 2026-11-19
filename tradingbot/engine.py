@@ -13,12 +13,14 @@ stop if they have none. Orders the bot did not place are never cancelled, except
 is left without a position.
 """
 
+import calendar
 from dataclasses import dataclass
 import json
 import logging
 import math
 import os
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -34,6 +36,22 @@ PAIRS: Dict[str, Tuple[int, int]] = {      # pair -> (price digits, amount digit
 MIN_AMOUNT = 0.0001
 MIN_NOTIONAL_JPY = 500.0
 ACTIVE = ("UNFILLED", "INACTIVE", "PARTIALLY_FILLED")
+
+# Bitbank error codes (github.com/bitbankinc/bitbank-api-docs, errors.md)
+ORDER_GONE = (50009, 50026, 50027)       # order not found, already cancelled, already executed
+STOP_CONFLICT = (50062, 60001, 60011)    # exceeds the position, insufficient amount, too many orders: the
+                                         # stop already resting is in the way, so cancelling it first can help
+BAD_TRIGGER = (40112, 60016)             # this trigger price is not accepted
+NO_VERDICT = (10001, 10003, 10005, 70001, 70002, 70003, 70012)   # system error or timeout: the order may
+                                         # have been taken all the same
+# 60018 (the stop would trigger at once) needs nothing of its own: the next tick finds the price at the stop
+# level and closes the position at market. Every other code (rate limit 1xxxx, account restrictions 5xxxx,
+# suspensions 7xxxx) and every transport error leaves the stop that is in place alone.
+
+
+def _error_code(e: Exception) -> Optional[int]:
+    m = re.search(r"'code':\s*(\d+)", str(e))
+    return int(m.group(1)) if m else None
 
 
 def fmt_price(pair: str, price: float) -> str:
@@ -52,6 +70,16 @@ def floor_amount(pair: str, amount: float) -> float:
 
 def _remaining(order: Dict[str, Any]) -> float:
     return float(order.get("remaining_amount") or order.get("start_amount") or 0.0)
+
+
+def write_atomic(path: str, text: str) -> None:
+    """Write a file so that a crash leaves either the old or the new version, never half of one."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 @dataclass
@@ -109,6 +137,9 @@ class Engine:
         self.clock = clock
         self.sleep = sleep
         self.entries_enabled = True
+        self.lock = threading.RLock()    # held during every step; the server takes it for the operator's actions
+        self.epoch = 0                   # raised by the server when the operator changes orders or positions
+        self._tick_epoch = 0
         self.tick_count = 0
         self.floor_hit = False
         self.account: Optional[Account] = None
@@ -122,11 +153,14 @@ class Engine:
         self._stop_refusals: Dict[str, int] = {}     # consecutive refusals of a replacement stop, by pair
         self._naked_ticks: Dict[str, int] = {}       # consecutive ticks a bot position had no stop, by pair
         self._stop_retry_at: Dict[str, float] = {}
+        self._gone_ticks: Dict[str, int] = {}        # consecutive readings without the position, by pair
         self.last_step_error: Optional[str] = None
         self._logged_step_error: Optional[str] = None
         self._year_rows: Dict[Tuple[str, str], List[list]] = {}
         self._saved = ""
         self._load()
+        # positions seen on the last good reading; one that goes missing is asked for again before anything acts
+        self._last_held = {(p, "long") for p, m in self.positions.items() if m.get("amount")}
 
     # ------------------------------------------------------------------ persistence
 
@@ -153,8 +187,7 @@ class Engine:
         if blob == self._saved:
             return
         try:
-            with open(self.state_path, "w", encoding="utf-8") as f:
-                f.write(blob)
+            write_atomic(self.state_path, blob)
             self._saved = blob
         except Exception as e:
             logger.warning(f"Could not save {self.state_path}: {e}")
@@ -163,8 +196,7 @@ class Engine:
         if not self.journal_path:
             return
         try:
-            with open(self.journal_path, "w", encoding="utf-8") as f:
-                json.dump(self.journal, f, indent=1)
+            write_atomic(self.journal_path, json.dumps(self.journal, indent=1))
         except Exception as e:
             logger.warning(f"Could not save {self.journal_path}: {e}")
 
@@ -172,7 +204,14 @@ class Engine:
 
     def tick(self) -> Dict[str, Any]:
         self.tick_count += 1
+        self._tick_epoch = self.epoch
         acct = self.read_account()
+        if self._last_held - set(acct.positions):
+            # A position that was there on the last reading is missing from this one. Ask once more before
+            # anything acts on that: one bad reading must not cost a position its record or its stop.
+            fresh = self._read_positions(acct.prices)
+            acct.equity += sum(p.upnl for p in fresh.values()) - sum(p.upnl for p in acct.positions.values())
+            acct.positions = fresh
         self.account = acct
         self.last_step_error = None
         floor = self.settings.equity_floor_jpy
@@ -187,12 +226,19 @@ class Engine:
                 self._step(f"stop on {pos.pair}", self._protect, pos, acct)
             self._step("leftover stops", self._cancel_orphan_stops, acct, closed)
         self._step("signals", self._read_signals, acct)
+        self._last_held = set(acct.positions)
         self._save()
         return {"equity_jpy": acct.equity}
 
     def _step(self, name: str, fn: Callable[..., Any], *args: Any) -> Any:
         try:
-            return fn(*args)
+            with self.lock:
+                if self._tick_epoch != self.epoch:
+                    return None        # the operator acted after this tick read the account: wait for a fresh reading
+                try:
+                    return fn(*args)
+                finally:
+                    self._save()       # a restart right after this step must not lose what it did
         except Exception as e:
             self.last_step_error = f"{name}: {type(e).__name__}: {e}"
             if self.last_step_error != self._logged_step_error:      # log a repeating failure once
@@ -284,17 +330,20 @@ class Engine:
         as closed only once the exchange has opened the next one, so a fast local clock cannot make the bot
         act on a candle that is still forming."""
         year = time.gmtime(now_ms / 1000).tm_year
-        rows: List[list] = []
-        for y in (year - 1, year):
-            key = (pair, str(y))
-            if y == year or key not in self._year_rows:
-                try:
-                    self._year_rows[key] = list(self.client.candles(pair, "4hour", str(y)))
-                except Exception:
-                    if y == year:
-                        raise
-                    self._year_rows[key] = []          # a pair listed this year has no earlier file
-            rows += self._year_rows[key]
+        rows: List[list] = list(self.client.candles(pair, "4hour", str(year)))
+        key = (pair, str(year - 1))
+        prev = self._year_rows.get(key)
+        if prev is None:
+            try:
+                prev = list(self.client.candles(pair, "4hour", str(year - 1)))
+            except Exception:
+                prev = []                              # read again next time (a pair listed this year has no file)
+            # The file of a finished year is kept only once it can no longer change. In the first hours of a
+            # year it is read every time: its last candle has only just closed.
+            if prev and now_ms >= calendar.timegm((year, 1, 1, 6, 0, 0)) * 1000:
+                self._year_rows = {k: v for k, v in self._year_rows.items() if k[0] != pair}
+                self._year_rows[key] = prev
+        rows = prev + rows
         if not rows:
             return None
         newest = max(int(r[5]) for r in rows)
@@ -326,8 +375,11 @@ class Engine:
             if res.get("status") in ACTIVE + ("FULLY_FILLED",):
                 order_id = res.get("order_id")
         except Exception as e:
-            unconfirmed = True     # the order may be resting all the same if only the reply was lost
-            logger.warning(f"Maker buy on {pair} was not confirmed ({e}); buying at market on the next tick")
+            # A refusal with an error code means the exchange did not take the order. With no answer at all,
+            # or only a system error or a timeout, it may be resting all the same.
+            code = _error_code(e)
+            unconfirmed = code is None or code in NO_VERDICT
+            logger.warning(f"Maker buy on {pair} was not confirmed ({e}); buying at market instead")
         now = self.clock()
         self.entries[pair] = {"order_id": order_id, "amount": amount, "stop": plan.stop, "unconfirmed": unconfirmed,
                               "placed_ts": now if order_id is not None else now - p.maker_wait_sec}
@@ -344,23 +396,31 @@ class Engine:
     def _work_entry(self, pair: str, acct: Account) -> None:
         """Complete an entry whose maker order has been filled, has timed out, or was never confirmed."""
         now = self.clock()
-        e = self.entries[pair]
+        e = self.entries.get(pair)
+        if e is None:
+            return                                     # dropped by the operator a moment ago
+        go = self.entries_enabled                      # off (pause, emergency stop): finish without buying more
         executed = 0.0
         if e.get("unconfirmed"):
-            # The reply to the maker order was lost. If the order is on the book after all, adopt it so it
-            # is cancelled and counted below; what it already bought shows up as an open position.
-            e["unconfirmed"] = False
+            # There was no answer to the maker order, so it may be resting, or filled already, or it never
+            # arrived. On the book: adopt it, so it is cancelled and counted below. Filled: what it bought
+            # shows up as an open position. Neither: look once more on the next tick before buying at
+            # market, because a fill can take a moment to show up in the account.
             held = acct.positions.get((pair, "long"))
-            executed = held.amount if held is not None else 0.0
-            for o in acct.orders:
-                if (o.get("pair") == pair and o.get("type") == "limit" and o.get("side") == "buy"
-                        and o.get("position_side") == "long"
-                        and abs(float(o.get("start_amount") or 0.0) - e["amount"]) < 1e-9):
-                    e["order_id"], executed = o.get("order_id"), 0.0
-                    break
+            resting_buy = next((o for o in acct.orders if o.get("pair") == pair and o.get("type") == "limit"
+                                and o.get("side") == "buy" and o.get("position_side") == "long"
+                                and abs(float(o.get("start_amount") or 0.0) - e["amount"]) < 1e-9), None)
+            if resting_buy is not None:
+                e["order_id"] = resting_buy.get("order_id")
+            elif held is not None:
+                executed = held.amount
+            elif go and not e.get("looked"):
+                e["looked"] = True
+                return
+            e["unconfirmed"] = False
         oid = e.get("order_id")
         resting = oid is not None and any(o.get("order_id") == oid for o in acct.orders)
-        if resting and now < e["placed_ts"] + self.params.maker_wait_sec:
+        if resting and go and now < e["placed_ts"] + self.params.maker_wait_sec:
             return
         if oid is not None:
             if resting:
@@ -375,7 +435,10 @@ class Engine:
             executed = float(info.get("executed_amount") or 0.0)
         remaining = floor_amount(pair, e["amount"] - executed)
         last = acct.prices[pair]["last"]
-        if remaining >= MIN_AMOUNT and remaining * last >= MIN_NOTIONAL_JPY and last > e["stop"]:
+        if not go:
+            logger.warning(f"Entry on {pair} dropped: new entries are switched off "
+                           f"(filled {executed:g} of {e['amount']:g})")
+        elif remaining >= MIN_AMOUNT and remaining * last >= MIN_NOTIONAL_JPY and last > e["stop"]:
             try:
                 self.client.order(pair, "buy", amount=fmt_amount(pair, remaining), type_="market",
                                   position_side="long")
@@ -383,15 +446,16 @@ class Engine:
                                f"(maker order filled {executed:g} of {e['amount']:g})")
             except Exception as ex:
                 logger.error(f"Market buy on {pair} failed: {ex}")
-        del self.entries[pair]
+        self.entries.pop(pair, None)
         if pair in self.positions:
             self.positions[pair]['entry_done_ts'] = now
         for _ in range(3):                             # put the stop on in this same tick
             try:
-                acct.positions = self._read_positions(acct.prices)
+                fresh = self._read_positions(acct.prices)
             except Exception:
                 break
-            if (pair, "long") in acct.positions:
+            acct.positions.update(fresh)               # adds what is new; a reading that misses something removes nothing
+            if (pair, "long") in fresh:
                 break
             self.sleep(0.5)
 
@@ -431,29 +495,48 @@ class Engine:
                   meta: Dict[str, Any]) -> None:
         """Put a full-size stop at `price`, then remove the stops it replaces (place before cancel).
 
-        A stop that is in place is never cancelled because of a transport error, a rate limit or a trading
-        halt: it keeps working and the move is retried on the next tick. Only when the exchange itself has
-        twice refused the new order is the old stop cancelled first, in case the exchange does not allow a
-        second closing order, and the old level goes straight back if the new one is refused again."""
+        A stop that is in place is never cancelled because the new one could not be placed, with one
+        exception: the exchange has twice answered that the resting stop itself is in the way (STOP_CONFLICT).
+        Then the old stop is cancelled first, and its level goes straight back if the new one fails again.
+        A transport error, a rate limit, an account restriction or a suspension never leads there, because
+        in those cases the old stop could not be put back. That is also why the new stop is always tried
+        first, even on an exchange known to refuse it: the answer shows whether orders are being taken."""
         pair = pos.pair
-        new, refused = self._place_stop(pos, close_side, price)
+        known = bool(old) and self._stop_refusals.get(pair, 0) >= 2
+        new, code = self._place_stop(pos, close_side, price, expected=STOP_CONFLICT if known else ())
+        fallback: Optional[float] = None
         if new is None and old:
-            if not refused:
-                return
-            self._stop_refusals[pair] = self._stop_refusals.get(pair, 0) + 1
-            if self._stop_refusals[pair] < 2:
-                return
-            old_level = max(float(o.get("trigger_price") or 0.0) for o in old)
+            if code in BAD_TRIGGER:                    # do not ask for this level again at once
+                self._stop_retry_at[pair] = self.clock() + self.STOP_RETRY_SEC
+            if code not in STOP_CONFLICT:
+                return                                 # the stop in place keeps working
+            covered = sum(_remaining(o) for o in old)
+            if abs(covered - pos.amount) <= pos.amount * 0.001:
+                # The stop in place has the right size and only its level is behind: no hurry.
+                self._stop_refusals[pair] = self._stop_refusals.get(pair, 0) + 1
+                if self._stop_refusals[pair] < 2:
+                    return
+            else:
+                # The position has outgrown its stop. Cover the missing part beside the stop that is there;
+                # if that is refused as well, the stop is replaced now, not a tick later.
+                missing = floor_amount(pair, pos.amount - covered + 1e-9)
+                if missing >= MIN_AMOUNT:
+                    extra, code = self._place_stop(pos, close_side, price, expected=STOP_CONFLICT, amount=missing)
+                    if extra is not None or code not in STOP_CONFLICT:
+                        return
+            fallback = max(float(o.get("trigger_price") or 0.0) for o in old)
             gone = all([self._cancel(pair, o.get("order_id")) for o in old])
-            new, refused = self._place_stop(pos, close_side, price)
+            new, code = self._place_stop(pos, close_side, price)
             if new is None and not gone:
                 return                                 # a cancel did not go through: the old stop still stands
             if gone:
                 old = []
-            if new is None:
-                if refused:                            # this level is not accepted: do not ask again at once
-                    self._stop_retry_at[pair] = self.clock() + self.STOP_RETRY_SEC
-                new, _ = self._place_stop(pos, close_side, old_level)
+        elif new is None and code in BAD_TRIGGER and meta["stop"] < price:
+            fallback = meta["stop"]                    # nothing in place: the last accepted level beats none
+        if new is None and fallback:
+            if code in BAD_TRIGGER:
+                self._stop_retry_at[pair] = self.clock() + self.STOP_RETRY_SEC
+            new, _ = self._place_stop(pos, close_side, fallback)
         if new is None:
             self._naked_ticks[pair] = self._naked_ticks.get(pair, 0) + 1
             if self._naked_ticks[pair] >= self.MAX_STOP_FAILURES:
@@ -467,18 +550,21 @@ class Engine:
             logger.info(f"Stop on {pair} moved up to {fmt_price(pair, level)} (best price {meta['best']:g})")
         meta["stop"], meta["stop_id"] = max(meta["stop"], level), new.get("order_id")
 
-    def _place_stop(self, pos: Position, close_side: str, price: float) -> Tuple[Optional[Dict[str, Any]], bool]:
-        """Returns (order, refused). `refused` is True when the exchange answered and turned the order down
-        for a reason of its own (order, funds or parameter codes 30000-69999); a transport error, a rate
-        limit (1xxxx) or a system error or trading halt (7xxxx) is not a refusal."""
+    def _place_stop(self, pos: Position, close_side: str, price: float, expected: Tuple[int, ...] = (),
+                    amount: Optional[float] = None) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+        """A stop for the whole position, or for `amount` of it. Returns (order, error code). The code is None
+        when the order was placed or when there was no answer from the exchange at all. A refusal with a code
+        in `expected` is not logged as an error."""
         try:
-            res = self.client.order(pos.pair, close_side, amount=fmt_amount(pos.pair, pos.amount), type_="stop",
+            size = fmt_amount(pos.pair, pos.amount if amount is None else amount)
+            res = self.client.order(pos.pair, close_side, amount=size, type_="stop",
                                     trigger_price=fmt_price(pos.pair, price), position_side=pos.side)
-            return (res if res.get("order_id") is not None else None), False
+            return (res if res.get("order_id") is not None else None), None
         except Exception as e:
-            logger.error(f"Stop order on {pos.pair} at {fmt_price(pos.pair, price)} failed: {e}")
-            code = re.search(r"'code':\s*(\d+)", str(e))
-            return None, bool(code) and 30000 <= int(code.group(1)) < 70000
+            code = _error_code(e)
+            (logger.debug if code in expected else logger.error)(
+                f"Stop order on {pos.pair} at {fmt_price(pos.pair, price)} failed: {e}")
+            return None, code
 
     def _protect_manual(self, pos: Position, close_side: str, covered: float) -> None:
         """A position the bot did not open: give it a stop if it has none. Nothing else is touched."""
@@ -517,20 +603,19 @@ class Engine:
             meta["exit_reason"] = why
 
     def _cancel(self, pair: str, order_id: Any) -> bool:
-        """True when the order is off the book: cancelled now, or already filled or cancelled (codes 5xxxx)."""
+        """True when the order is off the book: cancelled now, or the exchange says it is already gone."""
         if order_id is None:
             return True
         try:
             self.client.cancel(pair, order_id)
             return True
         except Exception as e:
-            code = re.search(r"'code':\s*(\d+)", str(e))
-            return bool(code) and 50000 <= int(code.group(1)) < 60000
+            return _error_code(e) in ORDER_GONE
 
     def _cancel_orphan_stops(self, acct: Account, just_closed: set) -> None:
         """A closing stop with no position behind it must not fire later. Cancel it on the second sighting,
-        or at once when its position closed on this tick."""
-        seen = set()
+        or at once when its position closed on this tick, and only after one more look at the positions."""
+        seen, due = set(), []
         for o in acct.orders:
             side = o.get("position_side")
             if o.get("type") != "stop" or side not in ("long", "short"):
@@ -543,9 +628,18 @@ class Engine:
             oid = o.get("order_id")
             seen.add(oid)
             if oid in self._orphan_seen or pair in just_closed:
-                logger.warning(f"Cancelling stop {oid} on {pair}: there is no position behind it")
-                self._cancel(pair, oid)
+                due.append(o)
         self._orphan_seen = seen
+        if not due:
+            return
+        fresh = self._read_positions(acct.prices)      # a stop is taken away only if a second reading agrees
+        for o in due:
+            pair, oid = o.get("pair"), o.get("order_id")
+            if (pair, o.get("position_side")) in fresh:
+                self._orphan_seen.discard(oid)
+                continue
+            logger.warning(f"Cancelling stop {oid} on {pair}: there is no position behind it")
+            self._cancel(pair, oid)
 
     # ------------------------------------------------------------------ closed trades
 
@@ -554,6 +648,7 @@ class Engine:
         now = self.clock()
         for pair in list(self.positions):
             if pair in self.entries or (pair, "long") in acct.positions:
+                self._gone_ticks.pop(pair, None)
                 continue
             meta = self.positions[pair]
             if not meta.get("amount"):
@@ -561,8 +656,14 @@ class Engine:
                 # record is kept for a while; without it the position would lose its stop plan and trailing.
                 if now - float(meta.setdefault("entry_done_ts", now)) < self.FILL_GRACE_SEC:
                     continue
+            else:
+                # Missing from one reading is not yet a closed trade: the record and the stop stay until a
+                # second reading in a row confirms it.
+                self._gone_ticks[pair] = self._gone_ticks.get(pair, 0) + 1
+                if self._gone_ticks[pair] < 2:
+                    continue
             del self.positions[pair]
-            for d in (self._stop_refusals, self._naked_ticks, self._stop_retry_at):
+            for d in (self._stop_refusals, self._naked_ticks, self._stop_retry_at, self._gone_ticks):
                 d.pop(pair, None)
             if not meta.get("amount"):
                 continue                               # the entry never filled
@@ -621,9 +722,10 @@ class Engine:
         held = {k[0]: v for k, v in (self.account.positions.items() if self.account else [])}
         for pair in PAIRS:
             s = self.snapshots.get(pair)
-            if pair in self.positions and pair in held:
+            meta = self.positions.get(pair)
+            if meta is not None and (pair in held or meta.get("amount")):
                 state = "HOLDING"
-            elif pair in self.entries or pair in self.positions:
+            elif pair in self.entries or meta is not None:
                 state = "BUYING"
             elif pair in held:
                 state = "MANUAL"

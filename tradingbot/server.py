@@ -29,7 +29,7 @@ import uvicorn
 
 from tradingbot.bitbank import Bitbank, BitbankError
 from tradingbot.dashboard_html import DASHBOARD_HTML, render_login_html
-from tradingbot.engine import Engine, PAIRS, Settings, floor_amount, fmt_amount
+from tradingbot.engine import Engine, PAIRS, Settings, floor_amount, fmt_amount, write_atomic
 from tradingbot.tax_japan import (
     build_tax_report,
     load_tax_profile,
@@ -125,6 +125,7 @@ class BotController:
 
     MAX_HISTORY_POINTS = 500
     HISTORY_EVERY_SEC = 300.0
+    EMERGENCY_RECHECK_SEC = 2.0     # after an emergency stop with an entry in progress, look for a late position
 
     def __init__(
         self,
@@ -194,29 +195,29 @@ class BotController:
             elif cfg.get("trading_enabled") is False:
                 self.running = False
         except Exception as e:
-            logger.warning(f"Could not load bot config: {e}")
+            # Unreadable settings: start paused, so a damaged file can never undo a pause or an emergency stop
+            self.running = False
+            logger.error(f"Could not load bot config ({e}); starting paused")
 
     def _save_config(self) -> None:
         if not self.config_path:
             return
         try:
             s = self.engine.settings
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "baseline_jpy": s.baseline_jpy,
-                        "capital_limit_jpy": s.capital_limit_jpy,
-                        "goal_target_jpy": self.goal_target_jpy,
-                        "equity_floor_jpy": s.equity_floor_jpy,
-                        "manual_stop_pct": round(s.manual_stop_pct * 100.0, 3),
-                        "risk_per_trade_pct": round(self.engine.params.risk_per_trade * 100.0, 3),
-                        "max_positions": self.engine.params.max_positions,
-                        "trading_enabled": self.running,
-                        "emergency_stopped": self.emergency_stopped,
-                    },
-                    f,
-                    indent=2,
-                )
+            write_atomic(self.config_path, json.dumps(
+                {
+                    "baseline_jpy": s.baseline_jpy,
+                    "capital_limit_jpy": s.capital_limit_jpy,
+                    "goal_target_jpy": self.goal_target_jpy,
+                    "equity_floor_jpy": s.equity_floor_jpy,
+                    "manual_stop_pct": round(s.manual_stop_pct * 100.0, 3),
+                    "risk_per_trade_pct": round(self.engine.params.risk_per_trade * 100.0, 3),
+                    "max_positions": self.engine.params.max_positions,
+                    "trading_enabled": self.running,
+                    "emergency_stopped": self.emergency_stopped,
+                },
+                indent=2,
+            ))
         except Exception as e:
             logger.warning(f"Could not save bot config: {e}")
 
@@ -294,8 +295,7 @@ class BotController:
         if not self.history_path:
             return
         try:
-            with open(self.history_path, "w", encoding="utf-8") as f:
-                json.dump(self.equity_history[-self.MAX_HISTORY_POINTS:], f)
+            write_atomic(self.history_path, json.dumps(self.equity_history[-self.MAX_HISTORY_POINTS:]))
         except Exception as e:
             logger.warning(f"Could not save equity history: {e}")
 
@@ -314,8 +314,7 @@ class BotController:
         if not self.trade_log_path:
             return
         try:
-            with open(self.trade_log_path, "w", encoding="utf-8") as f:
-                json.dump(self.trade_audit[-300:], f, indent=2)
+            write_atomic(self.trade_log_path, json.dumps(self.trade_audit[-300:], indent=2))
         except Exception as e:
             logger.warning(f"Could not save trade audit log: {e}")
 
@@ -405,7 +404,8 @@ class BotController:
         while not self._stop_event.is_set():
             # The engine ticks even while paused or stopped: it then opens nothing new, but open positions
             # keep their exchange stops (and the bot's own positions keep trailing).
-            self.engine.entries_enabled = self.running and not self.emergency_stopped
+            with self.lock:
+                self.engine.entries_enabled = self.running and not self.emergency_stopped
             try:
                 res = self.engine.tick()
                 now = time.time()
@@ -431,6 +431,7 @@ class BotController:
         with self.lock:
             self.running = False
             self._save_config()
+        self.engine.entries_enabled = False        # at once, not only from the next tick
         return {"status": "PAUSED", "running": self.running}
 
     def resume(self) -> Dict[str, Any]:
@@ -454,25 +455,38 @@ class BotController:
         client = self.engine.client
 
         if not self.engine.dry_run and client is not None:
-            try:
-                for o in client._get("/user/spot/active_orders").get("orders", []):
-                    oid, pair = o.get("order_id"), o.get("pair")
-                    if oid is None or not pair:
-                        continue
-                    try:
-                        client.cancel(pair, oid)
-                        cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
-                    except Exception as e:
-                        errors.append(f"Cancel error on {pair} #{oid}: {e}")
-            except Exception as e:
-                errors.append(f"Could not list active orders: {e}")
-            closed_now, close_errors = self._close_margin(client)
-            closed += closed_now
-            errors += close_errors
-            closed_now, close_errors = self._sell_spot(client, list(PAIRS))
-            closed += closed_now
-            errors += close_errors
-            self.engine.entries.clear()
+            # No engine step runs while the lock is held, and the engine's record of entries in progress is
+            # dropped first, so it cannot finish a buy behind this.
+            with self.engine.lock:
+                self.engine.epoch += 1                 # a tick that is running stops acting on what it read before
+                in_flight = bool(self.engine.entries)
+                self.engine.entries.clear()
+                try:
+                    for o in client._get("/user/spot/active_orders").get("orders", []):
+                        oid, pair = o.get("order_id"), o.get("pair")
+                        if oid is None or not pair:
+                            continue
+                        try:
+                            client.cancel(pair, oid)
+                            cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
+                        except Exception as e:
+                            errors.append(f"Cancel error on {pair} #{oid}: {e}")
+                except Exception as e:
+                    errors.append(f"Could not list active orders: {e}")
+                closed_now, close_errors = self._close_margin(client)
+                closed += closed_now
+                errors += close_errors
+                closed_now, close_errors = self._sell_spot(client, list(PAIRS))
+                closed += closed_now
+                errors += close_errors
+            if in_flight:
+                # A buy that went out a moment before may not have shown up in the account yet: look again.
+                time.sleep(self.EMERGENCY_RECHECK_SEC)
+                with self.engine.lock:
+                    self.engine.epoch += 1
+                    closed_now, close_errors = self._close_margin(client)
+                    closed += closed_now
+                    errors += close_errors
 
         report = {
             "status": "EMERGENCY_STOPPED",
@@ -539,21 +553,23 @@ class BotController:
         client = self.engine.client
 
         if not self.engine.dry_run and client is not None:
-            try:
-                for o in client._get("/user/spot/active_orders", {"pair": pair}).get("orders", []):
-                    oid = o.get("order_id")
-                    if oid is not None:
-                        client.cancel(pair, oid)
-                        cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
-            except Exception as e:
-                errors.append(f"Cancel error on {pair}: {e}")
-            side = position_side if position_side in ("long", "short") else None
-            closed, close_errors = self._close_margin(client, pair, side)
-            errors += close_errors
-            if not closed and position_side in (None, "spot", "long"):
-                closed, close_errors = self._sell_spot(client, [pair])
+            with self.engine.lock:                     # no engine step runs meanwhile
+                self.engine.epoch += 1                 # a tick that is running stops acting on what it read before
+                self.engine.entries.pop(pair, None)    # first: the engine must not finish an entry on this coin
+                try:
+                    for o in client._get("/user/spot/active_orders", {"pair": pair}).get("orders", []):
+                        oid = o.get("order_id")
+                        if oid is not None:
+                            client.cancel(pair, oid)
+                            cancelled.append({"pair": pair, "order_id": oid, "type": o.get("type")})
+                except Exception as e:
+                    errors.append(f"Cancel error on {pair}: {e}")
+                side = position_side if position_side in ("long", "short") else None
+                closed, close_errors = self._close_margin(client, pair, side)
                 errors += close_errors
-            self.engine.entries.pop(pair, None)
+                if not closed and position_side in (None, "spot", "long"):
+                    closed, close_errors = self._sell_spot(client, [pair])
+                    errors += close_errors
 
         logger.warning(f"MANUAL CLOSE EXECUTED on {pair} ({position_side}): closed={closed}, cancelled={cancelled}, errors={errors}")
         return {

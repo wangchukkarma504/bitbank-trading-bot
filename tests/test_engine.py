@@ -1,5 +1,6 @@
 """Tests for the live engine against the simulated exchange (tests/mock_bitbank.py)."""
 
+import calendar
 import os
 import tempfile
 import unittest
@@ -97,12 +98,56 @@ class TestEntries(unittest.TestCase):
         rig = Rig()
         rig.breakout(close=ETH * 1.01)                       # plan price above the ask is clipped to the bid ...
         real_order = rig.mock.order
-        rig.mock.order = lambda pair, side, **kw: (_ for _ in ()).throw(BitbankError("refused")) \
+        refused = BitbankError("order: {'success': 0, 'data': {'code': 70021}}")     # the exchange said no
+        rig.mock.order = lambda pair, side, **kw: (_ for _ in ()).throw(refused) \
             if kw.get("type_") == "limit" else real_order(pair, side, **kw)
         rig.tick()
         self.assertEqual(rig.long(), 0.0)
         rig.tick()
         self.assertGreater(rig.long(), 0.0)                  # ... and a refused limit order is bought at market
+        self.assertEqual(len(rig.live(type="stop", side="sell")), 1)
+
+    def test_maker_order_without_any_answer_is_looked_for_twice_before_buying_at_market(self):
+        rig = Rig()
+        rig.breakout()
+        real_order = rig.mock.order
+        rig.mock.order = lambda pair, side, **kw: (_ for _ in ()).throw(TimeoutError("no answer")) \
+            if kw.get("type_") == "limit" else real_order(pair, side, **kw)
+        rig.tick()                                           # the order never arrived, but the bot cannot know
+        rig.tick()                                           # nothing on the book, no position: look once more
+        self.assertEqual(rig.long(), 0.0)
+        self.assertEqual(rig.mock.orders, {})
+        rig.tick()                                           # still nothing: buy at market
+        self.assertGreater(rig.long(), 0.0)
+        self.assertEqual(len(rig.live(type="stop", side="sell")), 1)
+
+    def test_lost_reply_that_filled_and_shows_up_late_is_not_bought_twice(self):
+        rig = Rig()
+        rig.breakout()
+        real_order = rig.mock.order
+
+        def lost_reply(pair, side, **kw):
+            res = real_order(pair, side, **kw)
+            if kw.get("type_") == "limit":
+                raise BitbankError("reply lost")
+            return res
+        rig.mock.order = lost_reply
+        rig.tick()
+        planned = float(rig.live(side="buy", type="limit")[0]["start_amount"])
+        rig.mock.order = real_order
+        rig.mock.simulate_tick("eth_jpy", ETH * 0.999)       # the resting buy fills ...
+        rig.mock.simulate_tick("eth_jpy", ETH)
+        real_positions = rig.mock.margin_positions
+        calls = {"n": 0}
+
+        def lagging():                                       # ... but the account shows it one reading late
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else real_positions()
+        rig.mock.margin_positions = lagging
+        rig.tick()
+        rig.tick()
+        self.assertAlmostEqual(rig.long(), planned, places=4)
+        self.assertEqual(len([o for o in rig.mock.orders.values() if o["side"] == "buy"]), 1)
         self.assertEqual(len(rig.live(type="stop", side="sell")), 1)
 
     def test_lost_reply_to_the_maker_order_does_not_buy_twice(self):
@@ -157,6 +202,34 @@ class TestEntries(unittest.TestCase):
         rig.tick(130.0)
         self.assertEqual(rig.engine.positions, {})
         self.assertEqual(rig.engine.journal, [])
+
+    def test_entry_in_progress_is_dropped_when_new_entries_are_switched_off(self):
+        rig = Rig()
+        rig.breakout()
+        rig.tick()
+        self.assertEqual(len(rig.live(side="buy", type="limit")), 1)
+        rig.engine.entries_enabled = False                   # pause or emergency stop
+        rig.tick()
+        self.assertEqual(rig.live(side="buy"), [])           # the resting buy is cancelled at once ...
+        self.assertEqual(rig.engine.entries, {})
+        rig.tick(601.0)
+        self.assertEqual(rig.long(), 0.0)                    # ... and nothing is bought at market later
+
+    def test_half_filled_entry_keeps_its_stop_when_new_entries_are_switched_off(self):
+        rig = Rig()
+        rig.breakout()
+        rig.tick()
+        order = rig.live(side="buy", type="limit")[0]
+        half = float(order["start_amount"]) / 2
+        rig.mock._update_margin_position("eth_jpy", "long", delta_amount=half, fill_price=ETH)
+        order["executed_amount"], order["remaining_amount"] = f"{half:.4f}", f"{half:.4f}"
+        rig.engine.entries_enabled = False
+        rig.tick()
+        self.assertEqual(rig.live(side="buy"), [])
+        self.assertAlmostEqual(rig.long(), half, places=4)   # what was bought stays, with its stop
+        stops = rig.live(type="stop", side="sell")
+        self.assertEqual(len(stops), 1)
+        self.assertAlmostEqual(float(stops[0]["start_amount"]), half, places=4)
 
     def test_strongest_breakouts_fill_the_free_slots(self):
         rig = Rig(params=Params(max_positions=2))
@@ -231,6 +304,8 @@ class TestStops(unittest.TestCase):
         rig.mock.simulate_tick("eth_jpy", ETH * 0.93)        # through the 6% stop
         rig.tick()
         self.assertEqual(rig.long(), 0.0)
+        self.assertEqual(rig.engine.journal, [])             # one reading without the position is not yet a close
+        rig.tick()
         self.assertEqual(rig.engine.positions, {})
         row = rig.engine.journal[-1]
         self.assertEqual((row["pair"], row["reason"]), ("eth_jpy", "initial stop"))
@@ -258,6 +333,7 @@ class TestStops(unittest.TestCase):
         rig.mock._get = with_history
         rig.mock.simulate_tick("eth_jpy", ETH * 0.93)
         rig.tick()
+        rig.tick()
         # profit_loss already contains the fees: only the interest comes off, and nothing is counted twice
         self.assertAlmostEqual(rig.engine.journal[-1]["pnl_jpy"], -432.5)
 
@@ -270,6 +346,51 @@ class TestStops(unittest.TestCase):
         stops = rig.live(type="stop")
         self.assertEqual(len(stops), 1)
         self.assertAlmostEqual(float(stops[0]["start_amount"]), before + 0.005, places=4)
+
+    def test_grown_position_is_covered_at_once_where_only_one_closing_stop_is_allowed(self):
+        rig = Rig()
+        rig.open_long()
+        before = rig.long()
+        real_order = rig.mock.order
+
+        def one_closing_stop_only(pair, side, **kw):
+            if kw.get("type_") == "stop" and rig.live(type="stop", pair=pair):
+                raise BitbankError("order: {'success': 0, 'data': {'code': 60001}}")
+            return real_order(pair, side, **kw)
+        rig.mock.order = one_closing_stop_only
+        rig.mock._update_margin_position("eth_jpy", "long", delta_amount=0.005, fill_price=ETH)
+        rig.tick()                                           # no waiting tick: part of the position had no stop
+        stops = rig.live(type="stop")
+        self.assertEqual(len(stops), 1)
+        self.assertAlmostEqual(float(stops[0]["start_amount"]), before + 0.005, places=4)
+
+    def test_grown_position_gets_the_missing_part_covered_beside_its_stop(self):
+        rig = Rig()
+        rig.open_long()
+        old = rig.live(type="stop")[0]
+        before = rig.long()
+        real_order = rig.mock.order
+
+        def within_the_position(pair, side, **kw):           # closing orders may not add up to more than is open
+            if kw.get("type_") == "stop":
+                resting = sum(float(o["remaining_amount"]) for o in rig.live(type="stop", pair=pair))
+                if resting + float(kw["amount"]) > rig.long(pair) + 1e-9:
+                    raise BitbankError("order: {'success': 0, 'data': {'code': 50062}}")
+            return real_order(pair, side, **kw)
+        rig.mock.order = within_the_position
+        rig.mock._update_margin_position("eth_jpy", "long", delta_amount=0.005, fill_price=ETH)
+        rig.tick()
+        stops = rig.live(type="stop")
+        self.assertEqual(len(stops), 2)                      # the old stop was never taken away
+        self.assertIn(old["order_id"], [o["order_id"] for o in stops])
+        self.assertAlmostEqual(sum(float(o["remaining_amount"]) for o in stops), before + 0.005, places=4)
+        rig.mock.simulate_tick("eth_jpy", ETH * 1.10)        # at the next move the two become one again
+        rig.tick()
+        rig.tick()
+        stops = rig.live(type="stop")
+        self.assertEqual(len(stops), 1)
+        self.assertAlmostEqual(float(stops[0]["start_amount"]), before + 0.005, places=4)
+        self.assertGreater(float(stops[0]["trigger_price"]), float(old["trigger_price"]))
 
     def test_failed_stop_placement_keeps_the_old_stop_and_retries(self):
         rig = Rig()
@@ -362,26 +483,143 @@ class TestStops(unittest.TestCase):
         self.assertEqual(len(stops), 1)
         self.assertGreater(float(stops[0]["trigger_price"]), float(old["trigger_price"]))
 
-    def test_refused_stop_level_puts_the_old_level_back_and_waits(self):
+    def test_refused_trigger_price_leaves_the_working_stop_alone_and_waits(self):
         rig = Rig()
         rig.open_long()
-        old_level = float(rig.live(type="stop")[0]["trigger_price"])
+        old = rig.live(type="stop")[0]
+        real_order = rig.mock.order
+        asked = []
+
+        def trigger_refused(pair, side, **kw):
+            if kw.get("type_") == "stop":
+                asked.append(kw["trigger_price"])
+                raise BitbankError("order: {'success': 0, 'data': {'code': 60016}}")  # trigger price not accepted
+            return real_order(pair, side, **kw)
+        rig.mock.order = trigger_refused
+        rig.mock.simulate_tick("eth_jpy", ETH * 1.10)
+        for _ in range(6):
+            rig.tick()
+            self.assertEqual([o["order_id"] for o in rig.live(type="stop")], [old["order_id"]])   # never touched
+        self.assertEqual(len(asked), 1)                      # asked once, then not again for five minutes
+        rig.tick(300.0)
+        self.assertEqual(len(asked), 2)
+        self.assertGreater(rig.long(), 0.0)
+
+    def test_account_restriction_never_costs_the_working_stop(self):
+        rig = Rig()
+        rig.open_long()
+        old = rig.live(type="stop")[0]
+        real_order = rig.mock.order
+
+        def restricted(pair, side, **kw):                    # "Margin sell orders to close positions are not available"
+            raise BitbankError("order: {'success': 0, 'data': {'code': 50082}}")
+        rig.mock.order = restricted
+        rig.mock.simulate_tick("eth_jpy", ETH * 1.10)
+        for _ in range(10):
+            rig.tick()
+        self.assertEqual([o["order_id"] for o in rig.live(type="stop")], [old["order_id"]])
+        self.assertGreater(rig.long(), 0.0)
+        rig.mock.order = real_order
+        rig.tick()
+        self.assertGreater(float(rig.live(type="stop")[0]["trigger_price"]), float(old["trigger_price"]))
+
+    def test_position_without_a_stop_gets_the_last_accepted_level_when_the_new_one_is_refused(self):
+        rig = Rig()
+        rig.open_long()
+        old = rig.live(type="stop")[0]
+        old_level = float(old["trigger_price"])
+        rig.mock.cancel("eth_jpy", old["order_id"])          # the stop has vanished
         real_order = rig.mock.order
 
         def only_the_old_level(pair, side, **kw):
             if kw.get("type_") == "stop" and abs(float(kw["trigger_price"]) - old_level) > 1:
-                raise BitbankError("order: {'success': 0, 'data': {'code': 60005}}")  # this trigger price is refused
+                raise BitbankError("order: {'success': 0, 'data': {'code': 40112}}")  # invalid trigger price
             return real_order(pair, side, **kw)
         rig.mock.order = only_the_old_level
         rig.mock.simulate_tick("eth_jpy", ETH * 1.10)
-        for _ in range(6):
+        rig.tick()
+        stops = rig.live(type="stop")
+        self.assertEqual(len(stops), 1)
+        self.assertAlmostEqual(float(stops[0]["trigger_price"]), old_level)
+        for _ in range(5):
             rig.tick()
-            stops = rig.live(type="stop")
-            self.assertEqual(len(stops), 1)                  # protected after every tick
-            self.assertAlmostEqual(float(stops[0]["trigger_price"]), old_level)
-        placed = [o for o in rig.mock.orders.values() if o["type"] == "stop"]
-        self.assertLessEqual(len(placed), 3)                 # put back once, then left alone for five minutes
-        self.assertGreater(rig.long(), 0.0)
+        self.assertGreater(rig.long(), 0.0)                  # protected at the old level, not closed
+
+    def test_position_missing_from_one_reading_keeps_its_stop_and_its_plan(self):
+        rig = Rig()
+        rig.open_long()
+        old = rig.live(type="stop")[0]
+        real_positions = rig.mock.margin_positions
+        calls = {"n": 0}
+
+        def one_blank_reading():
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else real_positions()
+        rig.mock.margin_positions = one_blank_reading
+        rig.tick()                                           # the account reading shows no position
+        self.assertEqual([o["order_id"] for o in rig.live(type="stop")], [old["order_id"]])
+        self.assertIn("eth_jpy", rig.engine.positions)
+        self.assertEqual(rig.engine.journal, [])
+        rig.mock.simulate_tick("eth_jpy", ETH * 1.10)
+        rig.tick()                                           # it is back: still the bot's trade, still trailing
+        stops = rig.live(type="stop")
+        self.assertEqual(len(stops), 1)
+        self.assertGreater(float(stops[0]["trigger_price"]), float(old["trigger_price"]))
+        self.assertEqual(rig.engine.journal, [])
+
+    def _blank_every_first_reading(self, rig):
+        real_positions = rig.mock.margin_positions
+        calls = {"n": 0}
+
+        def blank_then_real():                               # every tick's first reading misses every position
+            calls["n"] += 1
+            return [] if calls["n"] % 2 == 1 else real_positions()
+        rig.mock.margin_positions = blank_then_real
+
+    def test_bad_readings_neither_close_a_trade_nor_cancel_any_stop(self):
+        rig = Rig()
+        rig.open_long()
+        bot_stop = rig.live(type="stop")[0]["order_id"]
+        rig.mock._update_margin_position("sol_jpy", "short", delta_amount=0.5, fill_price=13750.0)   # the user's trade
+        own = rig.mock.order("sol_jpy", "buy", amount="0.5000", type_="stop", trigger_price="14100.0",
+                             position_side="short")["order_id"]                                     # and the user's stop
+        rig.tick()
+        self._blank_every_first_reading(rig)
+        for _ in range(4):
+            rig.tick()
+        self.assertEqual({o["order_id"] for o in rig.live(type="stop")}, {bot_stop, own})
+        self.assertIn("eth_jpy", rig.engine.positions)
+        self.assertEqual(rig.engine.journal, [])
+
+    def test_bad_readings_right_after_a_restart_cancel_nothing(self):
+        rig = Rig()
+        rig.open_long()
+        bot_stop = rig.live(type="stop")[0]["order_id"]
+        rig.engine = rig.build()                             # restart
+        self._blank_every_first_reading(rig)
+        for _ in range(4):
+            rig.tick()
+        self.assertEqual([o["order_id"] for o in rig.live(type="stop")], [bot_stop])
+        self.assertIn("eth_jpy", rig.engine.positions)
+        self.assertEqual(rig.engine.journal, [])
+
+    def test_tick_does_not_act_on_a_reading_taken_before_an_operator_action(self):
+        rig = Rig()
+        rig.open_long()
+        stop = rig.live(type="stop")[0]
+        rig.mock.simulate_tick("eth_jpy", ETH * 1.10)        # the stop would be moved up on this tick
+        real_read = rig.engine.read_account
+
+        def read_then_the_operator_acts():
+            acct = real_read()
+            rig.engine.epoch += 1                            # the Close button, pressed while the tick is running
+            return acct
+        rig.engine.read_account = read_then_the_operator_acts
+        rig.tick()
+        self.assertEqual([o["order_id"] for o in rig.live(type="stop")], [stop["order_id"]])   # nothing was touched
+        rig.engine.read_account = real_read
+        rig.tick()                                           # on a fresh reading it carries on
+        self.assertGreater(float(rig.live(type="stop")[0]["trigger_price"]), float(stop["trigger_price"]))
 
     def test_a_failing_step_does_not_keep_the_stops_from_running(self):
         rig = Rig()
@@ -479,6 +717,30 @@ class TestRobustness(unittest.TestCase):
         self.assertEqual(eng._bar_snapshot("btc_jpy", now_ms).ts, bar_ts - BAR_MS)
         rows.append(["100", "100.5", "99.5", "100", "1", bar_ts])                                  # it has now
         self.assertEqual(eng._bar_snapshot("btc_jpy", now_ms).ts, bar_ts)
+
+    def test_last_candle_of_a_year_is_read_again_once_the_year_is_over(self):
+        eng = Engine(client=MockBitbankClient(), mode="dry-run", state_path=None, journal_path=None,
+                     params=Params(channel_bars=20, atr_bars=5, momentum_bars=5))
+        new_year = calendar.timegm((2027, 1, 1, 0, 0, 0)) * 1000
+        old = [["100", "101", "99", "100", "1", new_year - (60 - i) * BAR_MS] for i in range(60)]
+        files = {"2026": old, "2027": []}
+
+        def candles(pair, tf, period):
+            if not files.get(period):
+                raise BitbankError("no such file")
+            return list(files[period])
+        eng.client.candles = candles
+        # 31 December, 20:00 UTC: the last candle of the year has just opened and is still forming
+        self.assertEqual(eng._bar_snapshot("btc_jpy", new_year - BAR_MS + 30_000).ts, new_year - BAR_MS)
+        old[-1] = ["100", "131", "99", "130", "1", new_year - BAR_MS]        # it closes at 130 ...
+        files["2027"] = [["130", "130", "130", "130", "1", new_year]]        # ... and the new year's file starts
+        s = eng._bar_snapshot("btc_jpy", new_year + 30_000)
+        self.assertEqual((s.ts, s.close), (new_year, 130.0))                 # judged on the finished candle
+        # later in the year the finished file is read once and kept
+        files["2027"] += [["130", "130", "130", "130", "1", new_year + i * BAR_MS] for i in range(1, 4)]
+        eng._bar_snapshot("btc_jpy", new_year + 3 * BAR_MS + 30_000)
+        files["2026"] = []
+        self.assertEqual(eng._bar_snapshot("btc_jpy", new_year + 3 * BAR_MS + 40_000).ts, new_year + 3 * BAR_MS)
 
     def test_watchlist_describes_every_coin(self):
         rig = Rig()

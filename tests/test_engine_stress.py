@@ -34,6 +34,11 @@ SCENARIOS = [
     ("everything at once", {"fault": 0.10, "restart": 0.01, "partial": 0.5, "manual": 0.02}),
     ("exchange refuses a second closing stop", {"one_stop": 1, "fault": 0.05}),
     ("trading halts", {"halt": 0.01, "fault": 0.05, "restart": 0.005}),
+    ("account readings that miss a position", {"blank": 0.02, "fault": 0.05, "restart": 0.005}),
+    ("one stop per position, halts and bad readings", {"one_stop": 1, "halt": 0.01, "blank": 0.01, "fault": 0.05,
+                                                       "restart": 0.005, "partial": 0.5}),
+    ("closing orders limited to the position size", {"one_stop": 2, "halt": 0.005, "fault": 0.05, "restart": 0.005,
+                                                     "partial": 0.5}),
 ]
 
 
@@ -102,15 +107,34 @@ def run(seed: int, ticks: int, cfg: dict):
         return full_fill(order, fill_price)
     mock._execute_limit_fill = limit_fill
 
+    # One reading of the positions that comes back empty although positions exist (never two in a row: the
+    # engine promises that a single bad reading does no harm, not that it can trade blind).
+    real_positions = mock.margin_positions
+    blank = {"armed": False, "last": -9, "used": False}
+
+    def positions():
+        if blank["armed"]:
+            blank["armed"], blank["used"] = False, True
+            stats["blank_readings"] += 1
+            return []
+        return real_positions()
+    mock.margin_positions = positions
+
     real_order = mock.order
 
     def watched_order(pair, side, **kw):
         if clock["t"] < halt_until["t"]:                       # orders restricted; cancels still work
             raise BitbankError("order: {'success': 0, 'data': {'code': 70009}} (halt)")
-        if (cfg.get("one_stop") and kw.get("type_") == "stop"
-                and any(o["status"] == "UNFILLED" and o["type"] == "stop" and o["pair"] == pair
-                        and o.get("position_side") == kw.get("position_side") for o in mock.orders.values())):
-            raise BitbankError("order: {'success': 0, 'data': {'code': 60001}} (second closing order)")
+        if cfg.get("one_stop") and kw.get("type_") == "stop":
+            resting = [o for o in mock.orders.values() if o["status"] == "UNFILLED" and o["type"] == "stop"
+                       and o["pair"] == pair and o.get("position_side") == kw.get("position_side")]
+            if cfg["one_stop"] == 1 and resting:               # one closing stop per position
+                raise BitbankError("order: {'success': 0, 'data': {'code': 60001}} (second closing order)")
+            open_amount = sum(float(p["open_amount"]) for p in mock.margin_positions_list
+                              if p["pair"] == pair and p["position_side"] == kw.get("position_side"))
+            if (cfg["one_stop"] == 2                           # closing orders may not exceed what is open
+                    and sum(float(o["remaining_amount"]) for o in resting) + float(kw["amount"]) > open_amount + 1e-9):
+                raise BitbankError("order: {'success': 0, 'data': {'code': 50062}} (exceeds the position)")
         if kw.get("type_") == "market" and (pair, kw.get("position_side")) in manual_positions:
             violations["bot_closed_manual_position"] += 1
         if kw.get("position_side") == "short" and side == "sell":
@@ -172,6 +196,8 @@ def run(seed: int, ticks: int, cfg: dict):
                     o = real_order(pair, "sell" if side == "short" else "buy", amount="0.0010",
                                    price=engine_mod.fmt_price(pair, far), type_="limit", position_side=side)
                     manual_orders.add(o["order_id"])
+            if rng.random() < cfg.get("blank", 0.0) and i - blank["last"] > 2:
+                blank["armed"], blank["last"] = True, i
             if rng.random() < cfg.get("halt", 0.0):
                 halt_until["t"] = clock["t"] + 20.0 * rng.randint(3, 15)
                 stats["halts"] += 1
@@ -179,15 +205,17 @@ def run(seed: int, ticks: int, cfg: dict):
                 eng = build()
                 stats["restarts"] += 1
             before = client.faults
+            blank["used"] = False
             client.armed = True
             try:
                 eng.tick()
             except BitbankError:
                 stats["failed_ticks"] += 1
+                blank["armed"] = False
             except Exception as e:  # noqa: BLE001
                 note("crash", f"{type(e).__name__}: {e}", i)
             client.armed = False
-            clean = clean + 1 if (client.faults == before and clock["t"] >= halt_until["t"]) else 0
+            clean = clean + 1 if (client.faults == before and clock["t"] >= halt_until["t"] and not blank["used"]) else 0
             # a manual position that the price has stopped out is no longer a manual position
             held = {(p["pair"], p["position_side"]): p for p in mock.margin_positions_list if float(p["open_amount"]) > 0}
             manual_positions &= set(held)
@@ -234,7 +262,8 @@ def audit(mock, eng, held, first_seen, manual_positions, manual_orders, orphan_s
         bot_longs += 1
         meta = eng.positions.get(pair)
         if meta is None:
-            continue                                           # adopted after a lost state file: protected only
+            note("bot_position_without_record", f"{pair} {amt}: the bot has lost track of its own position", i)
+            continue
         if cover > amt * 1.001:
             note("stop_larger_than_position", f"{pair} {amt} covered {cover} in {len(stops)} stops", i)
         if stops:
@@ -274,7 +303,8 @@ def campaign(seeds: int, ticks: int, verbose: bool = False):
         if verbose:
             print(f"== {name}: {seeds} runs x {ticks} ticks | fills {s_all['fill_limit']} limit / {s_all['partial_fills']} partial / "
                   f"{s_all['fill_stop']} stop | closed trades {s_all['closed_trades']} | manual positions {s_all['manual_positions']} | "
-                  f"faults {s_all['faults']} | restarts {s_all['restarts']} | halts {s_all['halts']} | avg end equity {s_all['final_equity'] // seeds:,}")
+                  f"faults {s_all['faults']} | restarts {s_all['restarts']} | halts {s_all['halts']} | "
+                  f"blank readings {s_all['blank_readings']} | avg end equity {s_all['final_equity'] // seeds:,}")
             print("   violations:", dict(v_all) or "none")
     return total, first
 

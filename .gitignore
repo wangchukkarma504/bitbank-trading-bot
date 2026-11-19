@@ -54,3 +54,4 @@ scripts/
 !README.md
 !GEMINI.md
 _legacy/
+*.tmp
