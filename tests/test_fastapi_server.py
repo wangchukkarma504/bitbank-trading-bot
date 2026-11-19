@@ -334,16 +334,19 @@ class TestFastAPIServer(unittest.TestCase):
             o, px = px, px * (1.0 + (0.002 if i % 3 else -0.003))
             rows.append([str(o), str(max(o, px) * 1.001), str(min(o, px) * 0.999), str(px), "1.5", start + i * step])
         mock_bb.candles.return_value = rows
-        body = client.get("/api/forecast?pair=btc_jpy&tf=15min").json()
+        body = client.get("/api/forecast?pair=btc_jpy&tf=15min&ahead=1h").json()
         self.assertNotIn("error", body)
-        self.assertEqual(len(body["forecast"]), 8)                       # eight 15-minute candles ahead
-        self.assertEqual(body["forecast"][0]["t"], body["anchor_t"] + step)
+        self.assertEqual(len(body["forecast"]), 4)                       # one hour of 15-minute candles
+        self.assertEqual(body["forecast"][0]["t"], body["anchor_t"] + 2 * step)   # after the live candle
+        self.assertEqual(len(client.get("/api/forecast?pair=btc_jpy&tf=15min&ahead=1d").json()["forecast"]), 96)
+        self.assertIn("error", client.get("/api/forecast?pair=btc_jpy&tf=4hour&ahead=1h").json())
+        self.assertEqual(body["options"]["4hour"], ["4h", "1d"])
         for c in body["forecast"]:
             self.assertLessEqual(c["l"], min(c["o"], c["c"]))
             self.assertGreaterEqual(c["h"], max(c["o"], c["c"]))
             self.assertLess(c["band_lo"], c["band_hi"])
         self.assertGreater(len(body["past"]), 10)
-        self.assertIn("direction_hit_rate", body["metrics"])
+        self.assertIn("hit", body["metrics"])
         mock_bb.order.assert_not_called()                                 # the page never trades
 
     def test_pwa_manifest_service_worker_and_icons(self):

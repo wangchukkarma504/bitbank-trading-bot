@@ -836,7 +836,7 @@ class BotController:
                         hit = hit or (0.0, [])
                 raw_rows.extend(hit[1])
             candles = []
-            for row in raw_rows[-max(10, min(limit, 200)):]:
+            for row in raw_rows[-max(10, min(limit, 600)):]:
                 if len(row) >= 6:
                     candles.append({
                         "o": float(row[0]),
@@ -850,13 +850,12 @@ class BotController:
         except Exception as e:
             return {"pair": pair_clean, "tf": tf_clean, "candles": [], "error": str(e)}
 
-    def get_forecast(self, pair: str = "btc_jpy", horizon: str = "15min") -> Dict[str, Any]:
+    def get_forecast(self, pair: str = "btc_jpy", tf: str = "15min", ahead: str = "1h") -> Dict[str, Any]:
         """Live candles plus the experimental forecast (Prediction page). Read-only: no orders."""
-        horizon = forecast.OLD_NAMES.get(horizon, horizon)
-        horizon = horizon if horizon in forecast.HORIZONS else "15min"
-        data = self.get_candles(pair=pair, tf=forecast.HORIZONS[horizon][0], limit=200)
+        tf = tf if tf in forecast.TIMEFRAMES else "15min"
+        data = self.get_candles(pair=pair, tf=tf, limit=600)
         try:
-            res = forecast.forecast(data["candles"], horizon, int(time.time() * 1000))
+            res = forecast.forecast(data["candles"], tf, ahead, int(time.time() * 1000))
         except Exception as e:
             res = {"error": f"forecast failed: {e}"}
         res.update(pair=data["pair"], candles=data["candles"])
@@ -1111,8 +1110,8 @@ self.addEventListener('fetch', (e) => {
         return JSONResponse(controller.get_candles(pair=pair, tf=tf))
 
     @app.get("/api/forecast", dependencies=[Depends(require_auth)])
-    def api_forecast(pair: str = "btc_jpy", tf: str = "", horizon: str = "15min"):
-        return JSONResponse(controller.get_forecast(pair=pair, horizon=tf or horizon))
+    def api_forecast(pair: str = "btc_jpy", tf: str = "15min", ahead: str = "1h"):
+        return JSONResponse(controller.get_forecast(pair=pair, tf=tf, ahead=ahead))
 
     @app.post("/api/pause", dependencies=[Depends(require_auth)])
     def api_pause():

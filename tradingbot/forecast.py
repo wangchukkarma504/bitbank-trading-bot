@@ -1,14 +1,12 @@
 """Experimental price forecast for the dashboard's Prediction page. It never places or changes an order.
 
-A ridge regression, one per timeframe, trained by research/train_forecast.py on Bitbank candles of all five
-coins. From the candles up to the last closed one it predicts where the close will be after 1, 2, ... n more
-candles, in units of the coin's current volatility (ATR), plus a band the price stayed inside 80% of the time
-on held-out data. The same feature code is used for training and here, so what was tested is what is shown.
+A ridge regression, one per chart timeframe, trained by research/train_forecast.py on Bitbank candles of all five
+coins. From the candles up to the last closed one it predicts where the close will be after each of the next
+candles, in units of the coin's current volatility (ATR), plus a band the price stayed inside 80% of the time on
+held-out data. The same feature code is used for training and here, so what was tested is what is shown.
 
-    5-minute chart  ->  the next 12 candles (1 hour)
-    15-minute chart ->  the next 8 candles (2 hours)
-    1-hour chart    ->  the next 8 candles (8 hours)
-    4-hour chart    ->  the next 6 candles (1 day)
+The page asks for a chart timeframe and how far ahead: 15-minute candles one hour ahead are 4 candles, 1-hour
+candles one day ahead are 24, and so on. The predicted candles start after the candle that is still forming.
 """
 
 import json
@@ -17,13 +15,9 @@ import os
 from typing import Any, Dict, List, Optional, Sequence
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forecast_model.json")
-HORIZONS = {   # chart timeframe -> (timeframe, candle length in ms, candles predicted)
-    "5min": ("5min", 300_000, 12),
-    "15min": ("15min", 900_000, 8),
-    "1hour": ("1hour", 3_600_000, 8),
-    "4hour": ("4hour", 14_400_000, 6),
-}
-OLD_NAMES = {"1h": "15min", "4h": "1hour", "1d": "4hour"}
+TIMEFRAMES = {"5min": 300_000, "15min": 900_000, "1hour": 3_600_000, "4hour": 14_400_000}
+AHEAD = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+MAX_STEPS = {"5min": 49, "15min": 97, "1hour": 25, "4hour": 7}   # furthest step each model predicts (+1: live candle)
 FEATURES = ("r1", "r2", "r4", "r8", "r16", "r32", "dev20", "dev50", "atr", "rsi", "pos", "vol")
 WARMUP = 50
 
@@ -79,47 +73,69 @@ def _predict_steps(m: Dict[str, Any], f: List[float]) -> List[float]:
     return [b0 + sum(w * x for w, x in zip(ws, z)) for b0, ws in zip(m["intercept"], m["coef"])]
 
 
-def forecast(candles: List[Dict[str, Any]], horizon: str, now_ms: int, model: Optional[Dict[str, Any]] = None,
+def candles_ahead(tf: str, ahead: str) -> int:
+    """How many candles of `tf` make `ahead`; 0 when that combination is not offered."""
+    if tf not in TIMEFRAMES or ahead not in AHEAD:
+        return 0
+    k = AHEAD[ahead] // TIMEFRAMES[tf]
+    return k if 1 <= k and k + 1 <= MAX_STEPS[tf] else 0
+
+
+def options() -> Dict[str, List[str]]:
+    return {tf: [a for a in AHEAD if candles_ahead(tf, a)] for tf in TIMEFRAMES}
+
+
+def forecast(candles: List[Dict[str, Any]], tf: str, ahead: str, now_ms: int, model: Optional[Dict[str, Any]] = None,
              history: int = 40) -> Dict[str, Any]:
-    """Predicted candles after the last closed candle, and the one-step predictions the model made for the
-    last `history` candles (so the page can show how close they came)."""
-    horizon = OLD_NAMES.get(horizon, horizon)
-    tf, step_ms, n = HORIZONS.get(horizon, HORIZONS["15min"])
+    """Predicted candles for `ahead` after the candle that is still forming, and the one-candle-ahead
+    predictions the model made for the last `history` closed candles."""
+    tf = tf if tf in TIMEFRAMES else "15min"
+    step_ms, k = TIMEFRAMES[tf], candles_ahead(tf, ahead)
+    if not k:
+        return {"error": f"'{ahead}' ahead is not offered on {tf} candles", "options": options()}
     model = model or load_model()
     m = (model or {}).get("timeframes", {}).get(tf)
-    if m is None:
-        return {"error": "no trained model for this timeframe"}
-    closed = [k for k in candles if int(k["t"]) + step_ms <= now_ms]
-    bars = [(int(k["t"]), float(k["o"]), float(k["h"]), float(k["l"]), float(k["c"]), float(k["v"])) for k in closed]
+    if m is None or len(m["coef"]) < k + 1:
+        return {"error": "no trained model for this timeframe", "options": options()}
+    closed = [c for c in candles if int(c["t"]) + step_ms <= now_ms]
+    bars = [(int(c["t"]), float(c["o"]), float(c["h"]), float(c["l"]), float(c["c"]), float(c["v"])) for c in closed]
     feats = feature_series(bars)
     if not bars or feats[-1] is None:
-        return {"error": "not enough candles yet"}
-
-    def candles_from(i: int, steps: List[float]) -> List[Dict[str, float]]:
-        c0, a = bars[i][4], feats[i][8]
-        out, o = [], c0
-        for k, y in enumerate(steps):
-            c = c0 * math.exp(a * y)
-            out.append({"t": bars[i][0] + (k + 1) * step_ms, "o": o, "c": c,
-                        "h": max(o, c) * math.exp(a * m["wick_up"]), "l": min(o, c) * math.exp(-a * m["wick_down"]),
-                        "band_lo": c0 * math.exp(a * (y + m["band"][k][0])),
-                        "band_hi": c0 * math.exp(a * (y + m["band"][k][1]))})
-            o = c
-        return out
-
+        return {"error": "not enough candles yet", "options": options()}
     last = len(bars) - 1
-    future = candles_from(last, _predict_steps(m, feats[last]))
-    past, hits = [], 0
+    t0, c0, a = bars[last][0], bars[last][4], feats[last][8]
+    steps = _predict_steps(m, feats[last])
+    live = next((c for c in candles if int(c["t"]) == t0 + step_ms), None)
+
+    def candle(t: int, o: float, y: float, band: List[float]) -> Dict[str, float]:
+        c = c0 * math.exp(a * y)
+        return {"t": t, "o": o, "c": c, "h": max(o, c) * math.exp(a * m["wick_up"]),
+                "l": min(o, c) * math.exp(-a * m["wick_down"]),
+                "band_lo": c0 * math.exp(a * (y + band[0])), "band_hi": c0 * math.exp(a * (y + band[1]))}
+
+    out = []
+    o = float(live["c"]) if live else c0 * math.exp(a * steps[0])
+    for j in range(1, k + 1):
+        out.append(candle(t0 + (j + 1) * step_ms, o, steps[j], m["band"][j]))
+        o = out[-1]["c"]
+    past, hits, moved = [], 0, 0
     for i in range(max(0, last - history), last):
         if feats[i] is None:
             continue
-        p = candles_from(i, _predict_steps(m, feats[i])[:1])[0]
-        actual = bars[i + 1]
-        said_up, went_up = p["c"] > bars[i][4], actual[4] > bars[i][4]
-        if actual[4] != bars[i][4]:
-            hits += said_up == went_up
-        past.append(dict(p, hit=said_up == went_up))
-    return {"horizon": horizon, "tf": tf, "step_ms": step_ms, "anchor_t": bars[last][0], "anchor_close": bars[last][4],
-            "forecast": future, "past": past,
-            "recent_hit_rate": round(hits / len(past), 3) if past else None,
-            "metrics": m["metrics"], "trained": (model or {}).get("trained")}
+        y1 = _predict_steps(m, feats[i])[0]
+        ci, ai = bars[i][4], feats[i][8]
+        pc = ci * math.exp(ai * y1)
+        p = {"t": bars[i + 1][0], "o": ci, "c": pc, "h": max(ci, pc) * math.exp(ai * m["wick_up"]),
+             "l": min(ci, pc) * math.exp(-ai * m["wick_down"])}
+        if bars[i + 1][4] != ci:
+            moved += 1
+            hits += (pc > ci) == (bars[i + 1][4] > ci)
+        p["hit"] = (pc > ci) == (bars[i + 1][4] > ci)
+        past.append(p)
+    mt = {key: v for key, v in m["metrics"].items() if not key.endswith("_by_step")}
+    for key in ("hit_by_step", "majority_by_step", "coverage_by_step"):     # the figures for this horizon only
+        if key in m["metrics"]:
+            mt[key.replace("_by_step", "")] = m["metrics"][key][k]
+    return {"tf": tf, "ahead": ahead, "candles_ahead": k, "step_ms": step_ms, "anchor_t": t0, "anchor_close": c0,
+            "forecast": out, "past": past, "recent_hit_rate": round(hits / moved, 3) if moved else None,
+            "metrics": mt, "trained": (model or {}).get("trained"), "options": options()}
