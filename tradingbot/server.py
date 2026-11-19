@@ -28,7 +28,9 @@ from pydantic import BaseModel
 import uvicorn
 
 from tradingbot.bitbank import Bitbank, BitbankError
+from tradingbot import forecast
 from tradingbot.dashboard_html import DASHBOARD_HTML, render_login_html
+from tradingbot.predict_html import PREDICT_HTML
 from tradingbot.engine import Engine, PAIRS, Settings, floor_amount, fmt_amount, write_atomic
 from tradingbot.tax_japan import (
     build_tax_report,
@@ -600,7 +602,7 @@ class BotController:
         total_pnl_pct = (total_pnl / baseline * 100.0) if baseline > 0 else 0.0
 
         orders = list(acct.orders) if acct else []
-        active_stops = [o for o in orders if o.get("type") == "stop"]
+        active_stops = [o for o in orders if o.get("type") in ("stop", "stop_limit", "stop_loss")]
         open_positions: List[Dict[str, Any]] = []
         in_trade_pnl = in_trade_notional = in_trade_est_net = 0.0
         for (pair, side), pos in (acct.positions.items() if acct else []):
@@ -848,6 +850,17 @@ class BotController:
         except Exception as e:
             return {"pair": pair_clean, "tf": tf_clean, "candles": [], "error": str(e)}
 
+    def get_forecast(self, pair: str = "btc_jpy", horizon: str = "1h") -> Dict[str, Any]:
+        """Live candles plus the experimental forecast (Prediction page). Read-only: no orders."""
+        horizon = horizon if horizon in forecast.HORIZONS else "1h"
+        data = self.get_candles(pair=pair, tf=forecast.HORIZONS[horizon][0], limit=200)
+        try:
+            res = forecast.forecast(data["candles"], horizon, int(time.time() * 1000))
+        except Exception as e:
+            res = {"error": f"forecast failed: {e}"}
+        res.update(pair=data["pair"], candles=data["candles"])
+        return res
+
     def get_tax_report(self, year: Optional[int] = None) -> Dict[str, Any]:
         """Build the Japan Crypto Tax (確定申告 / 雑所得) report for the selected year."""
         with self.lock:
@@ -1023,6 +1036,15 @@ def create_app(controller: BotController) -> FastAPI:
             return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
         return HTMLResponse(DASHBOARD_HTML)
 
+    @app.get("/predict", response_class=HTMLResponse)
+    def predict_page(
+        request: Request,
+        credentials: Optional[HTTPBasicCredentials] = Depends(security),
+    ):
+        if not _is_authenticated(request, credentials):
+            return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+        return HTMLResponse(PREDICT_HTML)
+
     @app.get("/health")
     def health():
         return {"ok": True, "state": controller.get_status()["state"]}
@@ -1086,6 +1108,10 @@ self.addEventListener('fetch', (e) => {
     @app.get("/api/candles", dependencies=[Depends(require_auth)])
     def api_candles(pair: str = "btc_jpy", tf: str = "15min"):
         return JSONResponse(controller.get_candles(pair=pair, tf=tf))
+
+    @app.get("/api/forecast", dependencies=[Depends(require_auth)])
+    def api_forecast(pair: str = "btc_jpy", horizon: str = "1h"):
+        return JSONResponse(controller.get_forecast(pair=pair, horizon=horizon))
 
     @app.post("/api/pause", dependencies=[Depends(require_auth)])
     def api_pause():

@@ -18,7 +18,7 @@ It does not short. It does nothing in a falling market except wait.
 
 ### What the bot does about manual trades
 
-- A position you open yourself is never managed or closed by the bot. If it has no stop, the bot gives it one 1.2% from its entry on the second check (about 20 seconds later). You can move or cancel that stop.
+- A position you open yourself is never managed or closed by the bot. If it has no stop, the bot gives it one 1.2% from its entry on the second check (about 20 seconds later). You can move or cancel that stop. A stop-loss you set in the Bitbank app (or a stop or stop-limit order) counts: then the bot adds nothing.
 - Orders you place yourself are never cancelled.
 - A pair with a manual position is not traded by the bot, and manual positions count toward the 3-position limit.
 - **Pause** and **Emergency Stop** switch off new entries and survive a restart. Open positions keep their stops in both states, and the bot's own positions keep trailing.
@@ -50,6 +50,7 @@ What was tested and rejected on the same data:
 - **Selling rallies in a downtrend** (the previous rule: 4h down, 1h down, 15m RSI ≥ 65, 1.2% stop). Over 18 months of 5-minute candles it was between −0.09% and 0% per trade in every variant; its good results came only from the months it had been tuned on.
 - **Shorting breakdowns** (the mirror image of the buy rule). About zero or negative from 2023 on.
 - **Short channels** (3 days). Positive until 2022, negative since.
+- **A machine-learning filter** (`research/ml_filter.py`): logistic regression and boosted trees reading 19 patterns at each breakout (volatility, breakout strength, momentum, trend, volume, candle shape, Bitcoin's trend, how many coins are rising), trained year by year only on earlier trades. On the unseen years it could not tell good breakouts from bad ones (AUC 0.44 to 0.57, where 0.50 is chance), and every variant grew the account more slowly than taking every breakout in 2023 to 2026 (+16.6% to +25.3% a year against +30.2%). The bot does not use it.
 
 ---
 
@@ -63,6 +64,8 @@ What was tested and rejected on the same data:
 | `tradingbot/bitbank.py` | Minimal Bitbank REST client. |
 | `tradingbot/server.py`, `dashboard_html.py` | Control API and web dashboard. |
 | `tradingbot/tax_japan.py` | Japan tax report (雑所得) from the exchange's trade history. |
+| `tradingbot/forecast.py`, `forecast_model.json`, `predict_html.py` | The experimental Prediction page (never trades). |
+| `research/` | Machine-learning tests: `ml_filter.py` (breakout filter), `train_forecast.py` (trains the Prediction page's model). Need `pip install numpy scikit-learn`. |
 | `tests/` | Unit tests, a simulated exchange, and a randomised stress run of the engine. |
 
 Runtime files (not committed): `bot_config.json` (settings), `bot_state.json` (the bot's open positions), `trade_journal.json` (closed trades), `equity_history.json`, `trading_server.log`.
@@ -131,6 +134,8 @@ On Windows with WSL, `start_trading_server.bat` and `stop_trading_server.bat` do
 The dashboard (`http://localhost:8000`, or your own HTTPS address through a tunnel) shows equity, open positions with their stops, a price chart with entry and stop lines, the breakout watch (how far each coin is from its 20-day high), closed trades, and the Japan tax report. It can be installed as an app from the browser (iPhone: Share, then Add to Home Screen; Android and desktop Chrome: Install App).
 
 Buttons: **Pause / Resume**, **Close Position** for one pair, and **STOP ALL TRADES**, which cancels every order and closes every position at market.
+
+**Prediction** (`/predict`, also in the menu) is a test page for machine learning. It shows the live candles of a coin with predicted candles for the next hour (four 15-minute candles), the next 4 hours (four 1-hour candles) or the next day (six 4-hour candles) drawn on top. A shaded cone shows where the price ended 80% of the time on test data, and outlines show what the model predicted one candle ahead for the recent candles. The model is a ridge regression on 12 candle patterns, trained on all five coins and tested on months it never saw: it called the direction right 48 to 50% of the time, no better than a coin flip, while its 80% range held 80% of the time. It is shown for testing only and is never used to trade.
 
 ---
 

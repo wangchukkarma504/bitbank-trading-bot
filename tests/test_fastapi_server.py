@@ -322,6 +322,30 @@ class TestFastAPIServer(unittest.TestCase):
         self.assertGreaterEqual(len(data["candles"]), 2)
         self.assertEqual(data["candles"][0]["o"], 10350000.0)
 
+    def test_prediction_page_and_forecast_endpoint(self):
+        client, _, mock_bb = self._make_client(mode="live")
+        self.assertIn("Price prediction", client.get("/predict").text)
+        self.assertIn("/predict", client.get("/").text)
+        import time as _t
+        step = 900_000
+        start = (int(_t.time() * 1000) // step - 150) * step
+        rows, px = [], 10_000_000.0
+        for i in range(151):
+            o, px = px, px * (1.0 + (0.002 if i % 3 else -0.003))
+            rows.append([str(o), str(max(o, px) * 1.001), str(min(o, px) * 0.999), str(px), "1.5", start + i * step])
+        mock_bb.candles.return_value = rows
+        body = client.get("/api/forecast?pair=btc_jpy&horizon=1h").json()
+        self.assertNotIn("error", body)
+        self.assertEqual(len(body["forecast"]), 4)                       # four 15-minute candles ahead
+        self.assertEqual(body["forecast"][0]["t"], body["anchor_t"] + step)
+        for c in body["forecast"]:
+            self.assertLessEqual(c["l"], min(c["o"], c["c"]))
+            self.assertGreaterEqual(c["h"], max(c["o"], c["c"]))
+            self.assertLess(c["band_lo"], c["band_hi"])
+        self.assertGreater(len(body["past"]), 10)
+        self.assertIn("direction_hit_rate", body["metrics"])
+        mock_bb.order.assert_not_called()                                 # the page never trades
+
     def test_pwa_manifest_service_worker_and_icons(self):
         client, _, _ = self._make_client(mode="live")
         r_man = client.get("/manifest.webmanifest")

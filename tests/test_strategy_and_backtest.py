@@ -146,5 +146,16 @@ class TestReplay(unittest.TestCase):
         self.assertGreater(s["max_dd"], 0.039)                # two losses in a row: about -4%
 
 
+class TestForecastFeatures(unittest.TestCase):
+    def test_features_use_only_past_candles(self):
+        from tradingbot import forecast
+        bars = [[i * 900_000, 100.0 + i % 7, 101.0 + i % 7, 99.0 + i % 7, 100.5 + i % 7, 1.0 + i % 3] for i in range(120)]
+        full = forecast.feature_series(bars)
+        cut = forecast.feature_series(bars[:80])
+        self.assertIsNone(full[forecast.WARMUP - 1])
+        self.assertEqual(full[79], cut[79])                               # later candles never change an earlier row
+        self.assertEqual(len(full[100]), len(forecast.FEATURES))
+
+
 if __name__ == "__main__":
     unittest.main()

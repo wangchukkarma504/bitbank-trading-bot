@@ -576,6 +576,19 @@ class TestStops(unittest.TestCase):
             return [] if calls["n"] % 2 == 1 else real_positions()
         rig.mock.margin_positions = blank_then_real
 
+    def test_manual_position_with_bitbanks_own_stop_loss_gets_no_extra_stop(self):
+        rig = Rig()
+        rig.mock._update_margin_position("doge_jpy", "short", delta_amount=3825.1902, fill_price=9.4)
+        for oid, kind, trig in ((901, "stop_loss", "9.700"), (902, "take_profit", "8.800")):
+            rig.mock.orders[oid] = {"order_id": oid, "pair": "doge_jpy", "side": "buy", "type": kind,
+                                    "position_side": "short", "trigger_price": trig, "start_amount": None,
+                                    "remaining_amount": None, "executed_amount": "0", "price": None,
+                                    "status": "UNFILLED", "average_price": "0.0", "post_only": False}
+        for _ in range(4):
+            rig.tick()
+        self.assertEqual([o["order_id"] for o in rig.live(pair="doge_jpy")], [901, 902])   # nothing added or removed
+        self.assertEqual(rig.mock.orders[901]["status"], "UNFILLED")
+
     def test_bad_readings_neither_close_a_trade_nor_cancel_any_stop(self):
         rig = Rig()
         rig.open_long()

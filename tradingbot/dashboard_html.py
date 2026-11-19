@@ -260,6 +260,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="menu-popover" id="headerMenu">
         <span class="badge" id="apiBadge"><span class="dot offline"></span>API: CHECKING</span>
         <span class="badge" id="stateBadge">LOADING</span>
+        <button class="btn-glass" onclick="window.location.href='/predict'" style="color:#2563eb;font-weight:700;">Prediction (ML test)</button>
         <button class="btn-glass" onclick="closeHeaderMenu(); openSettings()">Settings</button>
         <button class="btn-glass" onclick="closeHeaderMenu(); scrollToTax()">Japan Tax (確定申告)</button>
         <button class="btn-glass" onclick="togglePause()" id="pauseBtn">Pause Bot</button>
@@ -302,6 +303,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <h2 style="margin:0;">Live Bitbank Price Chart</h2>
+        <a href="/predict" style="font-size:12px;font-weight:800;color:#2563eb;text-decoration:none;border:1px solid rgba(37,99,235,0.3);border-radius:8px;padding:4px 9px;background:rgba(255,255,255,0.9);">Prediction →</a>
         <select id="chartPairSel" onchange="onChartPairChange(this.value)" style="padding:5px 10px;border-radius:8px;border:1px solid rgba(15,23,42,0.16);background:rgba(255,255,255,0.9);font-weight:700;font-size:12px;">
           <option value="btc_jpy">BTC / JPY</option>
           <option value="eth_jpy">ETH / JPY</option>

@@ -468,6 +468,14 @@ class Engine:
         covered = sum(_remaining(o) for o in stops)
         meta = self.positions.get(pos.pair) if pos.side == "long" else None
         if meta is None:
+            # The operator's own protection counts too: a stop-limit for its amount, or Bitbank's stop-loss
+            # order (type stop_loss), which covers the whole position and has no amount of its own.
+            theirs = [o for o in acct.orders if o.get("pair") == pos.pair and o.get("side") == close_side
+                      and o.get("position_side") == pos.side and o.get("type") in ("stop_limit", "stop_loss")]
+            if any(o.get("type") == "stop_loss" for o in theirs):
+                covered = pos.amount
+            else:
+                covered += sum(_remaining(o) for o in theirs)
             self._protect_manual(pos, close_side, covered)
             return
         if pos.avg > 0:
