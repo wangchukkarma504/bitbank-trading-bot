@@ -5,9 +5,10 @@ coins. From the candles up to the last closed one it predicts where the close wi
 candles, in units of the coin's current volatility (ATR), plus a band the price stayed inside 80% of the time
 on held-out data. The same feature code is used for training and here, so what was tested is what is shown.
 
-    1 hour ahead  ->  four 15-minute candles
-    4 hours ahead ->  four 1-hour candles
-    next day      ->  six 4-hour candles
+    5-minute chart  ->  the next 12 candles (1 hour)
+    15-minute chart ->  the next 8 candles (2 hours)
+    1-hour chart    ->  the next 8 candles (8 hours)
+    4-hour chart    ->  the next 6 candles (1 day)
 """
 
 import json
@@ -16,11 +17,13 @@ import os
 from typing import Any, Dict, List, Optional, Sequence
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forecast_model.json")
-HORIZONS = {   # horizon -> (chart timeframe, candle length in ms, candles predicted)
-    "1h": ("15min", 900_000, 4),
-    "4h": ("1hour", 3_600_000, 4),
-    "1d": ("4hour", 14_400_000, 6),
+HORIZONS = {   # chart timeframe -> (timeframe, candle length in ms, candles predicted)
+    "5min": ("5min", 300_000, 12),
+    "15min": ("15min", 900_000, 8),
+    "1hour": ("1hour", 3_600_000, 8),
+    "4hour": ("4hour", 14_400_000, 6),
 }
+OLD_NAMES = {"1h": "15min", "4h": "1hour", "1d": "4hour"}
 FEATURES = ("r1", "r2", "r4", "r8", "r16", "r32", "dev20", "dev50", "atr", "rsi", "pos", "vol")
 WARMUP = 50
 
@@ -80,7 +83,8 @@ def forecast(candles: List[Dict[str, Any]], horizon: str, now_ms: int, model: Op
              history: int = 40) -> Dict[str, Any]:
     """Predicted candles after the last closed candle, and the one-step predictions the model made for the
     last `history` candles (so the page can show how close they came)."""
-    tf, step_ms, n = HORIZONS.get(horizon, HORIZONS["1h"])
+    horizon = OLD_NAMES.get(horizon, horizon)
+    tf, step_ms, n = HORIZONS.get(horizon, HORIZONS["15min"])
     model = model or load_model()
     m = (model or {}).get("timeframes", {}).get(tf)
     if m is None:

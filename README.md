@@ -135,7 +135,7 @@ The dashboard (`http://localhost:8000`, or your own HTTPS address through a tunn
 
 Buttons: **Pause / Resume**, **Close Position** for one pair, and **STOP ALL TRADES**, which cancels every order and closes every position at market.
 
-**Prediction** (`/predict`, also in the menu) is a test page for machine learning. It shows the live candles of a coin with predicted candles for the next hour (four 15-minute candles), the next 4 hours (four 1-hour candles) or the next day (six 4-hour candles) drawn on top. A shaded cone shows where the price ended 80% of the time on test data, and outlines show what the model predicted one candle ahead for the recent candles. The model is a ridge regression on 12 candle patterns, trained on all five coins and tested on months it never saw: it called the direction right 48 to 50% of the time, no better than a coin flip, while its 80% range held 80% of the time. It is shown for testing only and is never used to trade.
+**Prediction** (`/predict`, also in the menu) is a test page for machine learning. It shows the live candles of a coin with predicted candles for the next hour on 5-minute, 15-minute, 1-hour or 4-hour candles (the next 12, 8, 8 or 6 candles: 1 hour, 2 hours, 8 hours or 1 day) drawn on top. A shaded cone shows where the price ended 80% of the time on test data, and outlines show what the model predicted one candle ahead for the recent candles. The model is a ridge regression on 12 candle patterns, trained on all five coins and tested on months it never saw: it called the direction right 48 to 50% of the time, no better than a coin flip, while its 80% range held 80% of the time. It is shown for testing only and is never used to trade.
 
 ---
 

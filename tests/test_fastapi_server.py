@@ -334,9 +334,9 @@ class TestFastAPIServer(unittest.TestCase):
             o, px = px, px * (1.0 + (0.002 if i % 3 else -0.003))
             rows.append([str(o), str(max(o, px) * 1.001), str(min(o, px) * 0.999), str(px), "1.5", start + i * step])
         mock_bb.candles.return_value = rows
-        body = client.get("/api/forecast?pair=btc_jpy&horizon=1h").json()
+        body = client.get("/api/forecast?pair=btc_jpy&tf=15min").json()
         self.assertNotIn("error", body)
-        self.assertEqual(len(body["forecast"]), 4)                       # four 15-minute candles ahead
+        self.assertEqual(len(body["forecast"]), 8)                       # eight 15-minute candles ahead
         self.assertEqual(body["forecast"][0]["t"], body["anchor_t"] + step)
         for c in body["forecast"]:
             self.assertLessEqual(c["l"], min(c["o"], c["c"]))

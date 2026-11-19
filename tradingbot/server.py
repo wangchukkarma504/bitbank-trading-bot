@@ -850,9 +850,10 @@ class BotController:
         except Exception as e:
             return {"pair": pair_clean, "tf": tf_clean, "candles": [], "error": str(e)}
 
-    def get_forecast(self, pair: str = "btc_jpy", horizon: str = "1h") -> Dict[str, Any]:
+    def get_forecast(self, pair: str = "btc_jpy", horizon: str = "15min") -> Dict[str, Any]:
         """Live candles plus the experimental forecast (Prediction page). Read-only: no orders."""
-        horizon = horizon if horizon in forecast.HORIZONS else "1h"
+        horizon = forecast.OLD_NAMES.get(horizon, horizon)
+        horizon = horizon if horizon in forecast.HORIZONS else "15min"
         data = self.get_candles(pair=pair, tf=forecast.HORIZONS[horizon][0], limit=200)
         try:
             res = forecast.forecast(data["candles"], horizon, int(time.time() * 1000))
@@ -1110,8 +1111,8 @@ self.addEventListener('fetch', (e) => {
         return JSONResponse(controller.get_candles(pair=pair, tf=tf))
 
     @app.get("/api/forecast", dependencies=[Depends(require_auth)])
-    def api_forecast(pair: str = "btc_jpy", horizon: str = "1h"):
-        return JSONResponse(controller.get_forecast(pair=pair, horizon=horizon))
+    def api_forecast(pair: str = "btc_jpy", tf: str = "", horizon: str = "15min"):
+        return JSONResponse(controller.get_forecast(pair=pair, horizon=tf or horizon))
 
     @app.post("/api/pause", dependencies=[Depends(require_auth)])
     def api_pause():
