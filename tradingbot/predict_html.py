@@ -6,6 +6,7 @@ PREDICT_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Prediction · Bitbank Bot</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0b0e14">
@@ -26,7 +27,7 @@ PREDICT_HTML = r"""<!doctype html>
   /* top bar */
   .topbar { position: sticky; top: 0; z-index: 50; background: rgba(11,14,20,0.86); backdrop-filter: blur(14px);
             -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border);
-            padding: 10px max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); }
+            padding: max(10px, calc(env(safe-area-inset-top) + 6px)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); }
   .topbar-in { max-width: 1500px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
   .back { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; color: var(--text);
           background: var(--panel2); border: 1px solid var(--border); text-decoration: none; font-size: 18px; flex: none; }
@@ -67,9 +68,13 @@ PREDICT_HTML = r"""<!doctype html>
   #chart { width: 100%; height: 100%; display: block; }
 
   #chartCard.fs { position: fixed; z-index: 1000; margin: 0; border-radius: 0; border: none; top: 0; left: 0;
-                  width: 100vw; height: 100vh; height: 100dvh; padding: 6px 8px; background: var(--bg);
-                  padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
-  #chartCard.fs.rot { width: 100vh; width: 100dvh; height: 100vw; transform: rotate(90deg) translateY(-100%); transform-origin: top left; }
+                  width: 100vw; height: 100vh; height: 100dvh; background: var(--bg);
+                  padding: max(6px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
+                           max(6px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+  /* turned sideways on an upright phone: the card's left edge is the screen's top (status bar, notch) and its right
+     edge the screen's bottom (home bar) */
+  #chartCard.fs.rot { width: 100vh; width: 100dvh; height: 100vw; transform: rotate(90deg) translateY(-100%); transform-origin: top left;
+                      padding: 6px max(8px, env(safe-area-inset-bottom)) 6px max(8px, calc(env(safe-area-inset-top) + 4px)); }
   #chartCard.fs .bar { margin-bottom: 6px; }
   #chartCard.fs .hint { display: none; }
   #chartCard.fs #chartBox { border-radius: 8px; }
@@ -246,7 +251,8 @@ function setFs(on) {
 function layout() {
   const card = $('chartCard'), box = $('chartBox'), fs = card.classList.contains('fs');
   card.classList.toggle('rot', fs && !document.fullscreenElement && window.innerHeight > window.innerWidth);
-  if (fs) box.style.height = (card.clientHeight - card.querySelector('.bar').offsetHeight - 20) + 'px';
+  if (fs) { const cs = getComputedStyle(card);
+    box.style.height = Math.max(200, card.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - card.querySelector('.bar').offsetHeight - 8) + 'px'; }
   else box.style.height = Math.round(window.innerWidth < 700 ? Math.max(430, window.innerHeight * 0.62) : Math.min(680, Math.max(520, window.innerHeight * 0.68))) + 'px';
   draw();
 }

@@ -4,7 +4,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>Bitbank Autonomous AI Trading Desk</title>
 <link rel="manifest" href="/manifest.webmanifest" />
 <meta name="theme-color" content="#0f172a" />
@@ -125,8 +125,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .menu-popover.open { display: flex; }
   .menu-popover .badge { width: 100%; justify-content: flex-start; }
   .menu-popover .btn-glass { width: 100%; text-align: left; padding: 9px 12px; font-size: 13px; }
+  body { padding-top: max(24px, calc(env(safe-area-inset-top) + 8px)); padding-left: max(24px, env(safe-area-inset-left));
+         padding-right: max(24px, env(safe-area-inset-right)); padding-bottom: max(24px, env(safe-area-inset-bottom)); }
   @media (max-width: 720px) {
-    body { padding: 12px; }
+    body { padding: max(12px, calc(env(safe-area-inset-top) + 6px)) max(12px, env(safe-area-inset-right))
+                    max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
     .table-wrap table { font-size: 11px; }
     .table-wrap th, .table-wrap td { padding: 6px 4px; white-space: nowrap; }
     .topbar { padding: 12px 14px; gap: 10px; margin-bottom: 12px; flex-wrap: nowrap; }
