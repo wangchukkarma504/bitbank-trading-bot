@@ -156,6 +156,22 @@ class TestForecastFeatures(unittest.TestCase):
         self.assertEqual(full[79], cut[79])                               # later candles never change an earlier row
         self.assertEqual(len(full[100]), len(forecast.FEATURES))
 
+    def test_all_62_signals_use_only_past_candles(self):
+        import math
+        from tradingbot import forecast
+        bars = []
+        for i in range(400):
+            mid = 100 + 5 * math.sin(i / 7) + i * 0.01
+            o, c = mid, mid + math.sin(i / 3)
+            bars.append([i * 900_000, o, max(o, c) + 0.5 + (i % 3) * 0.2, min(o, c) - 0.4 - (i % 2) * 0.3, c, 1.0 + i % 5])
+        btc = [[b[0], b[1] * 2, b[2] * 2, b[3] * 2, b[4] * 2, b[5]] for b in bars]
+        full = forecast.boost_features_v2(bars, btc, btc)
+        cut = forecast.boost_features_v2(bars[:300], btc[:300], btc[:300])
+        self.assertIsNotNone(full[299])
+        self.assertEqual(full[299], cut[299])                             # later candles never change an earlier row
+        self.assertEqual(len(full[350]), len(forecast.BOOST_FEATURES_V2))
+        self.assertTrue(all(math.isfinite(x) for x in full[350]))
+
 
 if __name__ == "__main__":
     unittest.main()

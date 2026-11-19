@@ -376,7 +376,8 @@ function draw() {
   let bot = '';
   past.forEach(o => bot += candle(o.c, x(o.i), yb, 'real'));
   fut.forEach(o => bot += candle(o.c, x(o.i), yb, 'future'));
-  past.forEach(o => bot += `<circle cx="${x(o.i).toFixed(1)}" cy="${(botY + botH - 5).toFixed(1)}" r="${Math.max(1.4, Math.min(2.6, sp * 0.18)).toFixed(1)}" fill="${o.c.hit ? C.hit : C.miss}"/>`);
+  past.forEach(o => { if (o.c.hit == null) return;
+    bot += `<circle cx="${x(o.i).toFixed(1)}" cy="${(botY + botH - 5).toFixed(1)}" r="${Math.max(1.4, Math.min(2.6, sp * 0.18)).toFixed(1)}" fill="${o.c.hit ? C.hit : C.miss}"/>`; });
   g += `<g clip-path="url(#cpB)">${bot}</g>`;
   const lastF = d.forecast[d.forecast.length - 1];
   const btags = lastF ? [{ y: yb(lastF.c), col: '#2563eb', text: fmt(lastF.c) }] : [];
@@ -408,7 +409,8 @@ function readout(i) {
   const a = d.candles.find(c => c.t === t), f = d.forecast.find(c => c.t === t), p = d.past.find(c => c.t === t);
   ro1.innerHTML = `${jst(t, true)} · real ` + (a ? ohlc(a) : '<tspan fill="#8b93a7">not yet</tspan>');
   ro2.innerHTML = f ? `<tspan fill="${C.pred}">model</tspan> ${ohlc(f)} <tspan fill="${C.pred}">· 80% ${fmt(f.band_lo)}–${fmt(f.band_hi)}</tspan>`
-    : p ? `<tspan fill="${C.pred}">model</tspan> ${ohlc(p)} <tspan fill="${p.hit ? C.hit : C.miss}">· ${p.hit ? 'right' : 'wrong'} direction</tspan>` : '';
+    : p ? `<tspan fill="${C.pred}">model${p.p_up != null ? ' ' + (p.p_up >= 0.5 ? 'up ' + Math.round(p.p_up * 100) : 'down ' + Math.round((1 - p.p_up) * 100)) + '%' : ''}</tspan> ${ohlc(p)} ` +
+          (p.hit == null ? `<tspan fill="${C.pred}">· forming now</tspan>` : `<tspan fill="${p.hit ? C.hit : C.miss}">· ${p.hit ? 'right' : 'wrong'} direction</tspan>`) : '';
 }
 
 // pointer: drag to pan, pinch / wheel to zoom, tap for prices, double-tap to reset
@@ -479,7 +481,11 @@ function kpis() {
   $('px').innerHTML = `<div class="p">¥${fmt(now)}</div><div class="c ${chg >= 0 ? 'up' : 'down'}">${pct(chg)} 24h</div>`;
   $('fcLabel').textContent = `${TF[d.tf]} candles · next ${AH[d.ahead]} · updates every 30 s`;
   const k = (l, v, s, cls) => `<div class="kpi"><div class="l">${l}</div><div class="v ${cls || ''}">${v}</div><div class="s">${s}</div></div>`;
-  $('kpis').innerHTML =
+  const nc = d.next_candle || {};
+  const ncTile = nc.p_up != null ? k(`Candle forming now (${TF[d.tf]})`, nc.p_up >= 0.5 ? `▲ Up ${Math.round(nc.p_up * 100)}%` : `▼ Down ${Math.round((1 - nc.p_up) * 100)}%`,
+      `Next-candle model (${nc.signals || '27 patterns'}, boosted trees): right ${(nc.hit * 100).toFixed(1)}% on ${nc.test_samples.toLocaleString()} candles since ${nc.test_from} it never saw; ` +
+      `${(nc.hit_top10 * 100).toFixed(1)}% when it was most sure. Guessing: ${(nc.majority * 100).toFixed(1)}%.`, nc.p_up >= 0.5 ? 'up' : 'down') : '';
+  $('kpis').innerHTML = ncTile +
     k(`Predicted in ${AH[d.ahead]}`, fmt(last.c), `${pct(ch)} from now (${fmt(now)})`, ch >= 0 ? 'up' : 'down') +
     k('80% range', `${fmt(last.band_lo)} – ${fmt(last.band_hi)}`, `On test data the price ended inside this range ${m.coverage != null ? (m.coverage * 100).toFixed(0) : 80}% of the time`) +
     k(`Direction right (test, ${AH[d.ahead]})`, m.hit != null ? `${(m.hit * 100).toFixed(1)}%` : '–',

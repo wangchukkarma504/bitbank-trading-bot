@@ -819,7 +819,7 @@ class BotController:
         if tf_clean == "4hour":
             periods = [str(now_utc.year - 1), str(now_utc.year)]
         else:
-            days_back = {"5min": 1, "15min": 3, "1hour": 9}.get(tf_clean, 1)
+            days_back = {"5min": 3, "15min": 7, "1hour": 30}.get(tf_clean, 1)
             periods = [(now_utc - timedelta(days=d)).strftime("%Y%m%d") for d in range(days_back, -1, -1)]
         raw_rows: List[Any] = []
         try:
@@ -836,7 +836,7 @@ class BotController:
                         hit = hit or (0.0, [])
                 raw_rows.extend(hit[1])
             candles = []
-            for row in raw_rows[-max(10, min(limit, 600)):]:
+            for row in raw_rows[-max(10, min(limit, 900)):]:
                 if len(row) >= 6:
                     candles.append({
                         "o": float(row[0]),
@@ -853,9 +853,12 @@ class BotController:
     def get_forecast(self, pair: str = "btc_jpy", tf: str = "15min", ahead: str = "1h") -> Dict[str, Any]:
         """Live candles plus the experimental forecast (Prediction page). Read-only: no orders."""
         tf = tf if tf in forecast.TIMEFRAMES else "15min"
-        data = self.get_candles(pair=pair, tf=tf, limit=600)
+        data = self.get_candles(pair=pair, tf=tf, limit=900)
         try:
-            res = forecast.forecast(data["candles"], tf, ahead, int(time.time() * 1000))
+            btc = data if data["pair"] == "btc_jpy" else self.get_candles(pair="btc_jpy", tf=tf, limit=900)
+            eth = data if data["pair"] == "eth_jpy" else self.get_candles(pair="eth_jpy", tf=tf, limit=900)
+            res = forecast.forecast(data["candles"], tf, ahead, int(time.time() * 1000), btc_candles=btc["candles"],
+                                    eth_candles=eth["candles"])
         except Exception as e:
             res = {"error": f"forecast failed: {e}"}
         res.update(pair=data["pair"], candles=data["candles"])
