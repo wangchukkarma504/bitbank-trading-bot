@@ -8,91 +8,130 @@ PREDICT_HTML = r"""<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Prediction · Bitbank Bot</title>
 <link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
 <style>
   :root {
-    --bg-grad: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 45%, #ede9fe 100%);
-    --card: rgba(255,255,255,0.84); --text: #0f172a; --muted: #475569; --line: rgba(15,23,42,0.08);
-    --up: #16a34a; --down: #dc2626; --amber: #d97706; --chart-bg: #131722; --blue: #2563eb;
+    --bg: #0b0e14; --panel: #131722; --panel2: #1a2030; --border: #232a3a; --border2: #2e3648;
+    --text: #e6e9ef; --muted: #8b93a7; --dim: #5f6880;
+    --up: #26a69a; --down: #ef5350; --blue: #3b82f6; --blue2: #60a5fa; --amber: #f59e0b;
+    --chart-bg: #131722; --radius: 16px;
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: var(--bg-grad); color: var(--text); min-height: 100vh; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Hiragino Sans", sans-serif;
+         background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; -webkit-font-smoothing: antialiased; }
   body.noscroll { overflow: hidden; }
-  .wrap { max-width: 1500px; margin: 0 auto; padding: 12px 12px 40px; }
-  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  h1 { font-size: 21px; margin: 0; }
-  h2 { font-size: 17px; margin: 0 0 10px; }
-  .sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
-  a.btn { border: 1px solid rgba(15,23,42,0.12); background: rgba(255,255,255,0.9); color: var(--text);
-          border-radius: 10px; padding: 8px 14px; font-weight: 700; font-size: 13.5px; text-decoration: none; }
-  .card { background: var(--card); border: 1px solid rgba(255,255,255,0.7); border-radius: 18px; padding: 14px;
-          box-shadow: 0 10px 30px rgba(15,23,42,0.07); margin-top: 12px; }
+  button, select, input { font-family: inherit; }
 
-  #chartCard { padding: 10px; }
-  .bar { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 8px; }
-  .bar select, .bar button, .seg button { border: 1px solid rgba(15,23,42,0.16); background: rgba(255,255,255,0.95); color: var(--text);
-          border-radius: 9px; padding: 6px 10px; font-weight: 700; font-size: 12.5px; cursor: pointer; }
-  .seg { display: inline-flex; gap: 4px; align-items: center; }
-  .seg .lbl { font-size: 11.5px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin-right: 2px; }
-  .seg button.on { background: var(--blue); color: #fff; border-color: var(--blue); }
-  .seg button:disabled { opacity: 0.35; cursor: default; }
+  /* top bar */
+  .topbar { position: sticky; top: 0; z-index: 50; background: rgba(11,14,20,0.86); backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border);
+            padding: 10px max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); }
+  .topbar-in { max-width: 1500px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+  .back { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; color: var(--text);
+          background: var(--panel2); border: 1px solid var(--border); text-decoration: none; font-size: 18px; flex: none; }
+  .ttl { flex: 1; min-width: 0; }
+  .ttl h1 { font-size: 17px; margin: 0; font-weight: 800; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+  .tag { font-size: 10px; font-weight: 800; letter-spacing: .06em; color: var(--amber); border: 1px solid rgba(245,158,11,0.4);
+         background: rgba(245,158,11,0.1); padding: 2px 6px; border-radius: 6px; }
+  .sub { color: var(--muted); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .px { text-align: right; flex: none; }
+  .px .p { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .px .c { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  .wrap { max-width: 1500px; margin: 0 auto; padding: 12px max(12px, env(safe-area-inset-right)) 40px max(12px, env(safe-area-inset-left)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-top: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; font-weight: 800; display: flex; align-items: center; gap: 8px; }
+  .card h2 .muted { font-weight: 600; color: var(--muted); font-size: 12px; }
+
+  /* chart card and its controls */
+  #chartCard { padding: 10px; margin-top: 0; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .bar select { appearance: none; -webkit-appearance: none; background: var(--panel2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b93a7' stroke-width='1.6' fill='none'/%3E%3C/svg%3E") no-repeat right 10px center;
+                color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 8px 28px 8px 12px; font-weight: 800; font-size: 13px; }
+  .seg { display: inline-flex; align-items: center; background: var(--panel2); border: 1px solid var(--border); border-radius: 11px; padding: 3px; gap: 2px; }
+  .seg .lbl { font-size: 10px; font-weight: 800; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; padding: 0 6px 0 5px; }
+  .seg button { border: none; background: transparent; color: var(--muted); border-radius: 8px; padding: 6px 10px; font-weight: 800; font-size: 12.5px; cursor: pointer; }
+  .seg button.on { background: var(--blue); color: #fff; box-shadow: 0 2px 8px rgba(59,130,246,0.35); }
+  .seg button:disabled { opacity: 0.3; cursor: default; }
   .bar .grow { flex: 1; }
-  .bar .fsbtn { background: #0f172a; color: #fff; border-color: #0f172a; }
-  .bar label { font-size: 12.5px; font-weight: 700; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
-  .hint { font-size: 11.5px; color: var(--muted); margin: 6px 2px 0; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--muted); cursor: pointer;
+          background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; }
+  .chip input { accent-color: var(--blue); margin: 0; }
+  .fsbtn { border: 1px solid var(--border2); background: var(--panel2); color: var(--text); border-radius: 10px; padding: 7px 12px;
+           font-weight: 800; font-size: 12.5px; cursor: pointer; }
+  .hint { font-size: 11px; color: var(--dim); margin: 8px 2px 0; text-align: center; }
   #chartBox { position: relative; width: 100%; height: 600px; background: var(--chart-bg); border-radius: 12px; overflow: hidden;
-              touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+              touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; border: 1px solid var(--border); }
   #chartBox.drag { cursor: grabbing; }
   #chart { width: 100%; height: 100%; display: block; }
 
-  #chartCard.fs { position: fixed; z-index: 1000; margin: 0; border-radius: 0; background: var(--chart-bg); border: none;
-                  top: 0; left: 0; width: 100vw; height: 100vh; height: 100dvh; padding: 6px 8px;
+  #chartCard.fs { position: fixed; z-index: 1000; margin: 0; border-radius: 0; border: none; top: 0; left: 0;
+                  width: 100vw; height: 100vh; height: 100dvh; padding: 6px 8px; background: var(--bg);
                   padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
   #chartCard.fs.rot { width: 100vh; width: 100dvh; height: 100vw; transform: rotate(90deg) translateY(-100%); transform-origin: top left; }
-  #chartCard.fs .bar select, #chartCard.fs .seg button:not(.on), #chartCard.fs .bar button:not(.fsbtn) { background: #1e2433; color: #d1d4dc; border-color: #2a3142; }
-  #chartCard.fs .bar label, #chartCard.fs .seg .lbl, #chartCard.fs .hint { color: #8b93a7; }
+  #chartCard.fs .bar { margin-bottom: 6px; }
   #chartCard.fs .hint { display: none; }
+  #chartCard.fs #chartBox { border-radius: 8px; }
+
+  /* summary tiles */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+  .kpi { background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .kpi .l { font-size: 10.5px; color: var(--muted); font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+  .kpi .v { font-size: 20px; font-weight: 800; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .kpi .s { font-size: 11.5px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
 
   /* calculator */
-  .calc { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-items: end; }
-  .field label { display: block; font-size: 12px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin-bottom: 5px; }
-  .field input, .field select { width: 100%; border: 1px solid rgba(15,23,42,0.16); border-radius: 10px; padding: 10px 12px;
-                                font-size: 17px; font-weight: 800; background: #fff; color: var(--text); }
-  .toggle { display: flex; gap: 6px; }
-  .toggle button { flex: 1; border: 1px solid rgba(15,23,42,0.16); border-radius: 10px; padding: 10px; font-size: 15px; font-weight: 800;
-                   background: #fff; cursor: pointer; color: var(--text); }
-  .toggle button.long.on { background: var(--up); color: #fff; border-color: var(--up); }
-  .toggle button.short.on { background: var(--down); color: #fff; border-color: var(--down); }
-  .toggle button.lev.on { background: #0f172a; color: #fff; border-color: #0f172a; }
-  .results { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
-  .res { border-radius: 14px; padding: 12px 14px; border: 1px solid var(--line); background: rgba(255,255,255,0.8); }
-  .res .l { font-size: 12px; color: var(--muted); font-weight: 800; text-transform: uppercase; }
-  .res .v { font-size: 26px; font-weight: 900; margin-top: 4px; }
-  .res .s { font-size: 12.5px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
-  .res.main { border: 2px solid var(--blue); }
-
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-  .kpi { background: rgba(255,255,255,0.75); border-radius: 14px; padding: 12px 14px; border: 1px solid var(--line); }
-  .kpi .l { font-size: 12px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
-  .kpi .v { font-size: 22px; font-weight: 800; margin-top: 4px; }
-  .kpi .s { font-size: 12.5px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+  .calc { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
+  .field label { display: block; font-size: 10.5px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+  .money { position: relative; }
+  .money span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 800; font-size: 16px; }
+  .field input, .field select { width: 100%; background: var(--panel2); border: 1px solid var(--border2); border-radius: 11px; padding: 11px 12px;
+         font-size: 17px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; outline: none; }
+  .money input { padding-left: 28px; }
+  .field input:focus, .field select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(59,130,246,0.2); }
+  .quick { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .quick button { background: transparent; border: 1px solid var(--border2); color: var(--muted); border-radius: 8px; padding: 4px 8px; font-size: 11.5px; font-weight: 800; cursor: pointer; }
+  .toggle { display: flex; gap: 6px; background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; padding: 3px; }
+  .toggle button { flex: 1; border: none; background: transparent; color: var(--muted); border-radius: 9px; padding: 9px 8px;
+                   font-size: 14.5px; font-weight: 800; cursor: pointer; }
+  .toggle button.long.on { background: var(--up); color: #fff; }
+  .toggle button.short.on { background: var(--down); color: #fff; }
+  .toggle button.lev.on { background: var(--text); color: var(--bg); }
+  .results { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+  .res { border-radius: 12px; padding: 12px 14px; background: var(--panel2); border: 1px solid var(--border); position: relative; overflow: hidden; }
+  .res::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--border2); }
+  .res:has(.v.up)::before { background: var(--up); } .res:has(.v.down)::before { background: var(--down); }
+  .res .l { font-size: 10.5px; color: var(--muted); font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+  .res .v { font-size: 24px; font-weight: 900; margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .res .s { font-size: 11.5px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
+  .res.main { grid-column: 1 / -1; background: linear-gradient(135deg, rgba(59,130,246,0.16), rgba(59,130,246,0.04)); border-color: rgba(59,130,246,0.45); }
+  .res.main .v { font-size: 34px; }
   .up { color: var(--up); } .down { color: var(--down); }
-  .note { font-size: 13px; color: var(--muted); line-height: 1.5; margin: 10px 0 0; }
-  .warn { background: rgba(217,119,6,0.1); border: 1px solid rgba(217,119,6,0.3); color: #92400e; border-radius: 12px;
-          padding: 10px 12px; font-size: 13px; line-height: 1.45; }
+  .note { font-size: 12.5px; color: var(--muted); line-height: 1.55; margin: 12px 0 0; }
+  .note b { color: var(--text); }
+
+  .warn { display: flex; gap: 10px; align-items: flex-start; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3);
+          color: #fcd34d; border-radius: 12px; padding: 11px 12px; font-size: 12.5px; line-height: 1.5; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; font-weight: 800; font-size: 13px; color: var(--text); list-style: none; padding: 6px 0; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "›"; display: inline-block; margin-right: 8px; transition: transform .15s; color: var(--muted); }
+  details[open] summary::before { transform: rotate(90deg); }
+  @media (max-width: 640px) { .res.main .v { font-size: 30px; } .px .p { font-size: 16px; } }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="top">
-    <div>
-      <h1>Price prediction <span style="font-size:12px;color:var(--amber);font-weight:800;">EXPERIMENTAL</span></h1>
-      <div class="sub" id="sub">Loading…</div>
-    </div>
-    <a class="btn" href="/">← Dashboard</a>
+<div class="topbar"><div class="topbar-in">
+  <a class="back" href="/" title="Dashboard">‹</a>
+  <div class="ttl">
+    <h1>Prediction <span class="tag">EXPERIMENTAL</span></h1>
+    <div class="sub" id="sub">Loading…</div>
   </div>
+  <div class="px" id="px"></div>
+</div></div>
 
+<div class="wrap">
   <div class="card" id="chartCard">
     <div class="bar">
       <select id="pair">
@@ -105,7 +144,7 @@ PREDICT_HTML = r"""<!doctype html>
       <span class="seg" id="aheads"><span class="lbl">Predict</span>
         <button data-v="1h">1 hour</button><button data-v="4h">4 hours</button><button data-v="1d">1 day</button>
       </span>
-      <label><input type="checkbox" id="showPast"> past</label>
+      <label class="chip"><input type="checkbox" id="showPast"> Past</label>
       <span class="grow"></span>
       <button class="fsbtn" id="fsBtn">⛶ Full screen</button>
     </div>
@@ -113,12 +152,20 @@ PREDICT_HTML = r"""<!doctype html>
     <div class="hint">Drag to move · pinch or scroll to zoom · double-tap to reset · tap a candle for its prices</div>
   </div>
 
+  <div class="card">
+    <h2>Forecast <span class="muted" id="fcLabel"></span></h2>
+    <div class="tiles" id="kpis"></div>
+  </div>
+
   <div class="card" id="calcCard">
     <h2>Profit / loss calculator</h2>
     <div class="calc">
-      <div class="field"><label>Amount (JPY)</label><input id="amt" type="number" inputmode="numeric" min="0" step="1000" value="10000"></div>
+      <div class="field"><label>Amount</label>
+        <div class="money"><span>¥</span><input id="amt" type="number" inputmode="numeric" min="0" step="1000" value="10000"></div>
+        <div class="quick"><button data-q="5000">5k</button><button data-q="10000">10k</button><button data-q="20000">20k</button><button data-q="50000">50k</button></div>
+      </div>
       <div class="field"><label>Direction</label><div class="toggle">
-        <button class="long" data-d="long">Long ▲</button><button class="short" data-d="short">Short ▼</button></div></div>
+        <button class="long" data-d="long">▲ Long</button><button class="short" data-d="short">▼ Short</button></div></div>
       <div class="field"><label>Leverage</label><div class="toggle">
         <button class="lev" data-l="1">1×</button><button class="lev" data-l="2">2×</button></div></div>
       <div class="field"><label>Hold for</label><select id="calcAhead">
@@ -129,13 +176,9 @@ PREDICT_HTML = r"""<!doctype html>
   </div>
 
   <div class="card">
-    <div class="grid" id="kpis"></div>
-  </div>
-
-  <div class="card">
-    <div class="warn">This is a test page. The prediction is <b>not</b> used by the bot and places no orders.
-      Short-term crypto moves are close to random: read the accuracy figures before trusting a predicted candle or a calculator result.</div>
-    <p class="note" id="how"></p>
+    <div class="warn"><span>⚠</span><div>This is a test page. The prediction is <b>not</b> used by the bot and places no orders.
+      Short-term crypto moves are close to random: read the accuracy figures before trusting a predicted candle or a calculator result.</div></div>
+    <details><summary>How the model works</summary><p class="note" id="how" style="margin-top:4px"></p></details>
   </div>
 </div>
 
@@ -182,6 +225,7 @@ document.querySelectorAll('.toggle [data-d]').forEach(b => b.onclick = () => { S
 document.querySelectorAll('.toggle [data-l]').forEach(b => b.onclick = () => { S.lev = +b.dataset.l; SV('calcLev', S.lev); syncButtons(); calc(); });
 $('amt').value = LS('calcAmt', '10000');
 $('amt').oninput = () => { SV('calcAmt', $('amt').value); calc(); };
+document.querySelectorAll('.quick [data-q]').forEach(b => b.onclick = () => { $('amt').value = b.dataset.q; SV('calcAmt', b.dataset.q); calc(); });
 $('calcAhead').onchange = () => { const a = $('calcAhead').value; if (!OPTS[S.tf].includes(a)) S.tf = a === '1d' ? '1hour' : '15min';
   S.ahead = a; SV('predAhead', a); SV('predTf2', S.tf); syncButtons(); resetView(); load(); };
 $('showPast').onchange = () => draw();
@@ -409,7 +453,10 @@ function calc() {
 function kpis() {
   const d = S.data; if (!d || d.error) { $('kpis').innerHTML = ''; $('sub').textContent = d ? d.error : ''; return; }
   const m = d.metrics, last = d.forecast[d.forecast.length - 1], now = d.candles[d.candles.length - 1].c, ch = last.c / now - 1;
-  $('sub').textContent = `${S.pair.replace('_jpy', '').toUpperCase()} · ${TF[d.tf]} candles · next ${AH[d.ahead]} = ${d.forecast.length} candles · model trained ${d.trained || '?'} · bot ${S.status ? S.status.state : ''} · updates every 30 s`;
+  $('sub').textContent = `${S.pair.replace('_jpy', '').toUpperCase()}/JPY · ${TF[d.tf]} · next ${AH[d.ahead]} (${d.forecast.length} candles) · bot ${S.status ? S.status.state.replace('_', ' ').toLowerCase() : ''}`;
+  const first = d.candles.find(c => c.t >= d.candles[d.candles.length - 1].t - 864e5) || d.candles[0], chg = now / first.o - 1;
+  $('px').innerHTML = `<div class="p">¥${fmt(now)}</div><div class="c ${chg >= 0 ? 'up' : 'down'}">${pct(chg)} 24h</div>`;
+  $('fcLabel').textContent = `${TF[d.tf]} candles · next ${AH[d.ahead]} · updates every 30 s`;
   const k = (l, v, s, cls) => `<div class="kpi"><div class="l">${l}</div><div class="v ${cls || ''}">${v}</div><div class="s">${s}</div></div>`;
   $('kpis').innerHTML =
     k(`Predicted in ${AH[d.ahead]}`, fmt(last.c), `${pct(ch)} from now (${fmt(now)})`, ch >= 0 ? 'up' : 'down') +

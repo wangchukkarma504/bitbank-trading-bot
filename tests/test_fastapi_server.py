@@ -324,7 +324,7 @@ class TestFastAPIServer(unittest.TestCase):
 
     def test_prediction_page_and_forecast_endpoint(self):
         client, _, mock_bb = self._make_client(mode="live")
-        self.assertIn("Price prediction", client.get("/predict").text)
+        self.assertIn("Profit / loss calculator", client.get("/predict").text)
         self.assertIn("/predict", client.get("/").text)
         import time as _t
         step = 900_000
